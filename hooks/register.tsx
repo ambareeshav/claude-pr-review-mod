@@ -19,6 +19,10 @@ const MAX_DIFF_CHARS = 9000; // Markdown elements cap at 10000 chars
 
 type RepoGroup = { label: string; root: string; ctx: RepoContext };
 
+type CommitInfo = { sha: string; subject: string; body: string };
+
+type ReviewTab = 'files' | 'commits';
+
 type ViewState =
   | { mode: 'error'; message: string }
   | { mode: 'browser'; group: RepoGroup; prs: PullRequestSummary[] }
@@ -28,6 +32,9 @@ type ViewState =
       group: RepoGroup;
       detail: PullRequestDetail;
       files: FileChange[];
+      commits: CommitInfo[];
+      activeTab: ReviewTab;
+      expandedShas: Set<string>;
       selectedPath: string | null;
       diffCache: Map<string, string>;
       loadingDiff: boolean;
@@ -147,6 +154,25 @@ async function gitDiffForFile($: any, root: string, target: string, source: stri
   return cleanUnifiedDiff(res.stdout);
 }
 
+const RECORD_SEP = '\x1e';
+const FIELD_SEP = '\x1f';
+
+/** Commits unique to the source branch (oldest first), the same way `gh`/ADO's
+ * own "Commits" tab lists a PR — from git log, not another provider API call. */
+async function gitCommitsBetween($: any, root: string, target: string, source: string): Promise<CommitInfo[]> {
+  const format = `%H${FIELD_SEP}%s${FIELD_SEP}%b${RECORD_SEP}`;
+  const res = await run($, ['git', 'log', '--reverse', `--format=${format}`, `origin/${target}..origin/${source}`], root);
+  if (res.exitCode !== 0) return [];
+  return res.stdout
+    .split(RECORD_SEP)
+    .map((rec) => rec.trim())
+    .filter(Boolean)
+    .map((rec): CommitInfo => {
+      const [sha, subject, body] = rec.split(FIELD_SEP);
+      return { sha: sha ?? '', subject: subject ?? '', body: (body ?? '').trim() };
+    });
+}
+
 // --- Azure DevOps REST (PR metadata only; diffs come from git) --------
 
 async function getAdoAccessToken($: any, ttlMinutes: number): Promise<string> {
@@ -254,7 +280,9 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
   const target = branchName(detail.targetRefName);
 
   const fetched = await fetchBranches($, group.root, [source, target]);
-  const files = fetched ? await gitDiffFiles($, group.root, target, source) : [];
+  const [files, commits] = fetched
+    ? await Promise.all([gitDiffFiles($, group.root, target, source), gitCommitsBetween($, group.root, target, source)])
+    : [[], []];
 
   let checkoutMessage: string | null = null;
   if (!fetched) {
@@ -269,6 +297,9 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
     group,
     detail,
     files,
+    commits,
+    activeTab: 'files',
+    expandedShas: new Set(),
     selectedPath: files[0]?.path ?? null,
     diffCache: new Map(),
     loadingDiff: false,
@@ -311,7 +342,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
   if (view.mode === 'browser' || view.mode === 'browser-all') {
     const groups = view.mode === 'browser' ? [{ group: view.group, prs: view.prs }] : view.groups;
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" gap={1}>
         {groups.map(({ group, prs }) => (
           <Box key={`group:${group.label}`} flexDirection="column">
             <Markdown text={`### ${group.label}`} />
@@ -338,18 +369,91 @@ function renderView($: any, e: any, options: any, view: ViewState) {
     (view.checkoutMessage ? `\n\n_${view.checkoutMessage}_` : '') +
     `\n\n${view.detail.description || '_no description_'}`;
 
-  const diffBody = view.selectedPath ? view.diffCache.get(view.selectedPath) : undefined;
-  const truncated = !!diffBody && diffBody.length > MAX_DIFF_CHARS;
-  const diffText = diffBody
-    ? '```diff\n' + diffBody.slice(0, MAX_DIFF_CHARS) + (truncated ? '\n… (truncated)' : '') + '\n```'
-    : view.loadingDiff
-      ? '_loading diff…_'
-      : '_select a file_';
+  const tabButton = (tab: ReviewTab, label: string) => (
+    <Button
+      key={`tab:${tab}`}
+      plain
+      label={view.activeTab === tab ? `● ${label}` : label}
+      onPress={() => {
+        view.activeTab = tab;
+        $.ui.invalidate('ui.render');
+      }}
+    />
+  );
 
-  const treeRows = buildFileTreeRows(view.files);
+  let content: any;
+  if (view.activeTab === 'commits') {
+    content = (
+      <Box flexDirection="column" gap={1}>
+        {view.commits.length === 0 && <Markdown text="_no commits on this branch_" />}
+        {view.commits.map((c) => {
+          const expanded = view.expandedShas.has(c.sha);
+          return (
+            <Box key={`commit:${c.sha}`} flexDirection="column">
+              <Button
+                key={`commit:${c.sha}`}
+                plain
+                label={`${c.sha.slice(0, 7)}  ${c.subject}`}
+                onPress={() => {
+                  if (expanded) view.expandedShas.delete(c.sha);
+                  else view.expandedShas.add(c.sha);
+                  $.ui.invalidate('ui.render');
+                }}
+              />
+              {expanded && (c.body ? <Markdown text={c.body} /> : <Text dimColor>  (no description)</Text>)}
+            </Box>
+          );
+        })}
+      </Box>
+    );
+  } else {
+    const diffBody = view.selectedPath ? view.diffCache.get(view.selectedPath) : undefined;
+    const truncated = !!diffBody && diffBody.length > MAX_DIFF_CHARS;
+    const diffText = diffBody
+      ? '```diff\n' + diffBody.slice(0, MAX_DIFF_CHARS) + (truncated ? '\n… (truncated)' : '') + '\n```'
+      : view.loadingDiff
+        ? '_loading diff…_'
+        : '_select a file_';
+
+    const treeRows = buildFileTreeRows(view.files);
+
+    content = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          {treeRows.map((row) =>
+            row.kind === 'dir' ? (
+              <Text key={`dir:${row.depth}:${row.name}`} dimColor>
+                {'  '.repeat(row.depth) + row.name + '/'}
+              </Text>
+            ) : (
+              <Box key={`file:${row.file.path}`} flexDirection="row" columnGap={1}>
+                <Button
+                  key={`file:${row.file.path}`}
+                  plain
+                  label={
+                    '  '.repeat(row.depth) +
+                    row.name +
+                    (row.file.path === view.selectedPath ? ' •' : '')
+                  }
+                  onPress={() => {
+                    view.selectedPath = row.file.path;
+                    loadDiffForSelected($, view).then(() => $.ui.invalidate('ui.render'));
+                  }}
+                />
+                {row.file.added !== null && <Text color="green">+{row.file.added}</Text>}
+                {row.file.deleted !== null && <Text color="red">-{row.file.deleted}</Text>}
+                {row.file.added === null && <Text dimColor>({row.file.status})</Text>}
+              </Box>
+            ),
+          )}
+        </Box>
+        <Markdown text={diffText} />
+      </Box>
+    );
+  }
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" gap={1}>
       <Button
         key="back"
         plain
@@ -359,35 +463,11 @@ function renderView($: any, e: any, options: any, view: ViewState) {
         }}
       />
       <Markdown text={header} />
-      <Box flexDirection="column">
-        {treeRows.map((row) =>
-          row.kind === 'dir' ? (
-            <Text key={`dir:${row.depth}:${row.name}`} dimColor>
-              {'  '.repeat(row.depth) + row.name + '/'}
-            </Text>
-          ) : (
-            <Box key={`file:${row.file.path}`} flexDirection="row" columnGap={1}>
-              <Button
-                key={`file:${row.file.path}`}
-                plain
-                label={
-                  '  '.repeat(row.depth) +
-                  row.name +
-                  (row.file.path === view.selectedPath ? ' •' : '')
-                }
-                onPress={() => {
-                  view.selectedPath = row.file.path;
-                  loadDiffForSelected($, view).then(() => $.ui.invalidate('ui.render'));
-                }}
-              />
-              {row.file.added !== null && <Text color="green">+{row.file.added}</Text>}
-              {row.file.deleted !== null && <Text color="red">-{row.file.deleted}</Text>}
-              {row.file.added === null && <Text dimColor>({row.file.status})</Text>}
-            </Box>
-          ),
-        )}
+      <Box flexDirection="row" columnGap={2}>
+        {tabButton('files', 'Files')}
+        {tabButton('commits', `Commits (${view.commits.length})`)}
       </Box>
-      <Markdown text={diffText} />
+      {content}
     </Box>
   );
 }

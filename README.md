@@ -30,8 +30,13 @@ not into an already-running session) and `/prs` is available.
   `origin` remote automatically; everything past that point (diffing, the
   file tree, the panel) is identical for both.
 - The panel: a `‹ back to PR list` button, the PR title/description/status,
-  changed files as an indented folder tree with green/red `+N`/`-M` counts,
-  and the selected file's diff (git's own hunks, boilerplate stripped).
+  and two tabs —
+  - **Files**: changed files as an indented folder tree with green/red
+    `+N`/`-M` counts, and the selected file's diff (git's own hunks,
+    boilerplate stripped).
+  - **Commits**: every commit unique to the PR's branch, compact (short sha
+    + subject) by default — click one to expand its full description in
+    place, click again to collapse.
 - Opening a PR also best-effort checks out its source branch locally.
 
 Not yet implemented: posting comments, replying to threads, voting
@@ -79,6 +84,11 @@ into `~/.claude/skills/prs` to auto-load every session.
   `gitDiffForFile`, or any rendering code at all. GitHub's calls go through
   `gh pr list`/`gh pr view --json ...`, not raw REST — `gh` already manages
   its own auth, so there's no token-caching code to mirror `getAdoAccessToken`.
+- **The Commits tab comes from `git log`, not a provider API either.**
+  `git log --reverse origin/<target>..origin/<source>` lists exactly the
+  commits the PR adds, in the order they'd apply — same refs already
+  fetched for diffing, so no `gh pr view --json commits` / ADO `commits`
+  endpoint needed, and it behaves identically for both providers.
 - **Diffs and the file tree come from `git diff`, not the ADO REST API.**
   Both branches are already fetched locally for the checkout step, so `git
   diff origin/<target>...origin/<source>` gives `--numstat` (per-file

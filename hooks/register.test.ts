@@ -57,6 +57,21 @@ function installMocks(on: any, opts: { checkoutSucceeds?: boolean; remoteUrl?: s
         ? { value: { exitCode: 0, stdout: '', stderr: '' } }
         : { value: { exitCode: 1, stdout: '', stderr: 'already checked out in another worktree' } };
     }
+    if (cmd === 'git' && rest[0] === 'log') {
+      const SEP1 = '\x1f';
+      const SEP2 = '\x1e';
+      const commits = [
+        { sha: 'a1b2c3d4e5f6', subject: 'fix upload retry', body: 'Retries once on a 5xx before giving up.' },
+        { sha: 'b2c3d4e5f6a1', subject: 'add test for retry path', body: '' },
+      ];
+      return {
+        value: {
+          exitCode: 0,
+          stdout: commits.map((c) => `${c.sha}${SEP1}${c.subject}${SEP1}${c.body}${SEP2}`).join(''),
+          stderr: '',
+        },
+      };
+    }
     if (cmd === 'git' && rest[0] === 'diff' && rest.includes('--name-status')) {
       return { value: { exitCode: 0, stdout: 'M\tsrc/app.ts\nA\tsrc/new-file.ts\n', stderr: '' } };
     }
@@ -185,6 +200,33 @@ test('the docked pane draws the file list and reacts to a file press', async ($:
   expect(await ui.find({ text: /new line/ })).toBeDefined();
   expect(await ui.find({ text: /diff --git/ })).toBeUndefined();
   expect(await ui.find({ text: /^index /m })).toBeUndefined();
+
+  await ui.unmount();
+});
+
+test('the commits tab lists commits compactly and expands one on press', async ($: any, on: any) => {
+  register(on, {});
+  installMocks(on);
+
+  await $.command.run({ command: 'prs', args: '318' });
+
+  const ui = await $.ui.mount({
+    plugin: 'prs',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'prs',
+    props: PANE_PROPS,
+  });
+
+  await ui.press({ key: 'tab:commits' });
+  expect(await ui.find({ text: /fix upload retry/ })).toBeDefined();
+  expect(await ui.find({ text: /Retries once on a 5xx/ })).toBeUndefined();
+
+  await ui.press({ key: 'commit:a1b2c3d4e5f6' });
+  expect(await ui.find({ text: /Retries once on a 5xx/ })).toBeDefined();
+
+  await ui.press({ key: 'commit:a1b2c3d4e5f6' });
+  expect(await ui.find({ text: /Retries once on a 5xx/ })).toBeUndefined();
 
   await ui.unmount();
 });
