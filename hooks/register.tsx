@@ -1,5 +1,5 @@
-import { parseAdoRemote, branchName } from './lib/git';
-import type { AdoRepoContext } from './lib/git';
+import { parseRemote, branchName } from './lib/git';
+import type { AdoRepoContext, GithubRepoContext, RepoContext } from './lib/git';
 import { adoBaseUrl, toPullRequestSummary, ADO_API_VERSION, ADO_RESOURCE_ID } from './lib/ado';
 import type { PullRequestSummary, PullRequestDetail } from './lib/ado';
 import { buildFileTreeRows } from './lib/tree';
@@ -17,7 +17,7 @@ const TOKEN_STORE_KEY = 'prs:ado-token';
 const PANE_ID = 'prs';
 const MAX_DIFF_CHARS = 9000; // Markdown elements cap at 10000 chars
 
-type RepoGroup = { label: string; root: string; ctx: AdoRepoContext };
+type RepoGroup = { label: string; root: string; ctx: RepoContext };
 
 type ViewState =
   | { mode: 'error'; message: string }
@@ -37,8 +37,8 @@ type ViewState =
 let currentView: ViewState | null = null;
 const repoRegistry = new Map<string, RepoGroup>();
 
-function repoLabel(ctx: AdoRepoContext): string {
-  return `${ctx.project}/${ctx.repo}`;
+function repoLabel(ctx: RepoContext): string {
+  return ctx.provider === 'github' ? `${ctx.github.owner}/${ctx.github.repo}` : `${ctx.ado.project}/${ctx.ado.repo}`;
 }
 
 function parseArgs(e: any): string {
@@ -68,13 +68,13 @@ async function run($: any, argv: string[], cwd?: string): Promise<{ stdout: stri
   return $.process.run(argv, cwd ? { cwd } : undefined);
 }
 
-async function resolveRepoContext($: any): Promise<{ root: string; ctx: AdoRepoContext } | null> {
+async function resolveRepoContext($: any): Promise<{ root: string; ctx: RepoContext } | null> {
   const toplevel = await run($, ['git', 'rev-parse', '--show-toplevel']);
   if (toplevel.exitCode !== 0) return null;
   const root = toplevel.stdout.trim();
   const remote = await run($, ['git', 'remote', 'get-url', 'origin'], root);
   if (remote.exitCode !== 0) return null;
-  const ctx = parseAdoRemote(remote.stdout.trim());
+  const ctx = parseRemote(remote.stdout.trim());
   if (!ctx) return null;
   return { root, ctx };
 }
@@ -183,22 +183,73 @@ async function adoJson($: any, ttlMinutes: number, url: string): Promise<any> {
   return JSON.parse(res.text);
 }
 
-async function listPullRequests($: any, ctx: AdoRepoContext, ttlMinutes: number): Promise<PullRequestSummary[]> {
+async function listAdoPullRequests($: any, ctx: AdoRepoContext, ttlMinutes: number): Promise<PullRequestSummary[]> {
   const url = `${adoBaseUrl(ctx)}/pullrequests?searchCriteria.status=active&api-version=${ADO_API_VERSION}`;
   const body = await adoJson($, ttlMinutes, url);
   return (body.value ?? []).map(toPullRequestSummary);
 }
 
-async function getPullRequest($: any, ctx: AdoRepoContext, ttlMinutes: number, id: number): Promise<PullRequestDetail> {
+async function getAdoPullRequest($: any, ctx: AdoRepoContext, ttlMinutes: number, id: number): Promise<PullRequestDetail> {
   const url = `${adoBaseUrl(ctx)}/pullrequests/${id}?api-version=${ADO_API_VERSION}`;
   const pr = await adoJson($, ttlMinutes, url);
   return { ...toPullRequestSummary(pr), description: pr.description ?? '' };
 }
 
+// --- GitHub (via the already-authenticated `gh` CLI; no token plumbing needed) --
+
+function toGithubSummary(pr: any): PullRequestSummary {
+  return {
+    pullRequestId: pr.number,
+    title: pr.title,
+    status: (pr.state ?? 'open').toLowerCase(),
+    createdBy: pr.author?.login ?? 'unknown',
+    sourceRefName: `refs/heads/${pr.headRefName}`,
+    targetRefName: `refs/heads/${pr.baseRefName}`,
+    creationDate: pr.createdAt,
+    isDraft: !!pr.isDraft,
+  };
+}
+
+async function listGithubPullRequests($: any, gh: GithubRepoContext): Promise<PullRequestSummary[]> {
+  const res = await run($, [
+    'gh', 'pr', 'list',
+    '--repo', `${gh.owner}/${gh.repo}`,
+    '--state', 'open',
+    '--json', 'number,title,author,headRefName,baseRefName,createdAt,isDraft',
+  ]);
+  if (res.exitCode !== 0) throw new Error(`gh pr list failed: ${(res.stderr || res.stdout).trim()}`);
+  return (JSON.parse(res.stdout) as any[]).map(toGithubSummary);
+}
+
+async function getGithubPullRequest($: any, gh: GithubRepoContext, id: number): Promise<PullRequestDetail> {
+  const res = await run($, [
+    'gh', 'pr', 'view', String(id),
+    '--repo', `${gh.owner}/${gh.repo}`,
+    '--json', 'number,title,author,headRefName,baseRefName,createdAt,isDraft,state,body',
+  ]);
+  if (res.exitCode !== 0) throw new Error(`gh pr view failed: ${(res.stderr || res.stdout).trim()}`);
+  const pr = JSON.parse(res.stdout);
+  return { ...toGithubSummary(pr), description: pr.body ?? '' };
+}
+
+// --- provider dispatch ------------------------------------------------
+
+async function listPullRequests($: any, group: RepoGroup, ttlMinutes: number): Promise<PullRequestSummary[]> {
+  return group.ctx.provider === 'github'
+    ? listGithubPullRequests($, group.ctx.github)
+    : listAdoPullRequests($, group.ctx.ado, ttlMinutes);
+}
+
+async function getPullRequest($: any, group: RepoGroup, ttlMinutes: number, id: number): Promise<PullRequestDetail> {
+  return group.ctx.provider === 'github'
+    ? getGithubPullRequest($, group.ctx.github, id)
+    : getAdoPullRequest($, group.ctx.ado, ttlMinutes, id);
+}
+
 // --- view construction --------------------------------------------------
 
 async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: number): Promise<void> {
-  const detail = await getPullRequest($, group.ctx, ttlMinutes, prId);
+  const detail = await getPullRequest($, group, ttlMinutes, prId);
   const source = branchName(detail.sourceRefName);
   const target = branchName(detail.targetRefName);
 
@@ -229,7 +280,7 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
 }
 
 async function goBackToBrowser($: any, ttlMinutes: number, group: RepoGroup): Promise<void> {
-  currentView = { mode: 'browser', group, prs: await listPullRequests($, group.ctx, ttlMinutes) };
+  currentView = { mode: 'browser', group, prs: await listPullRequests($, group, ttlMinutes) };
 }
 
 async function loadDiffForSelected($: any, view: Extract<ViewState, { mode: 'review' }>): Promise<void> {
@@ -349,26 +400,26 @@ async function handleCommandRun($: any, e: any, options: any): Promise<{ text: s
     if (args === '--all') {
       const groups: { group: RepoGroup; prs: PullRequestSummary[] }[] = [];
       for (const group of repoRegistry.values()) {
-        groups.push({ group, prs: await listPullRequests($, group.ctx, ttlMinutes) });
+        groups.push({ group, prs: await listPullRequests($, group, ttlMinutes) });
       }
       currentView =
         groups.length === 0
-          ? { mode: 'error', message: 'no Azure DevOps repos seen yet this session — run /prs once from inside one first' }
+          ? { mode: 'error', message: 'no GitHub or Azure DevOps repos seen yet this session — run /prs once from inside one first' }
           : { mode: 'browser-all', groups };
     } else if (/^\d+$/.test(args)) {
       const group = await ensureRepoGroup($);
       if (!group) {
-        currentView = { mode: 'error', message: "current directory isn't an Azure DevOps repo (no parseable origin remote)" };
+        currentView = { mode: 'error', message: "current directory isn't a GitHub or Azure DevOps repo (no parseable origin remote)" };
       } else {
         await openReview($, ttlMinutes, group, Number(args));
       }
     } else if (args.length === 0) {
       const group = await ensureRepoGroup($);
       if (!group) {
-        currentView = { mode: 'error', message: "current directory isn't an Azure DevOps repo (no parseable origin remote)" };
+        currentView = { mode: 'error', message: "current directory isn't a GitHub or Azure DevOps repo (no parseable origin remote)" };
       } else {
         const branch = await currentBranch($, group.root);
-        const prs = await listPullRequests($, group.ctx, ttlMinutes);
+        const prs = await listPullRequests($, group, ttlMinutes);
         const match = branch ? prs.find((pr) => branchName(pr.sourceRefName) === branch) : undefined;
         if (match) {
           await openReview($, ttlMinutes, group, match.pullRequestId);

@@ -14,8 +14,20 @@ const PR_318 = {
   isDraft: false,
 };
 
-function installMocks(on: any, opts: { checkoutSucceeds?: boolean } = {}) {
+const GITHUB_PR_42 = {
+  number: 42,
+  title: 'fix: retry flaky upload',
+  author: { login: 'octocat' },
+  headRefName: 'fix/retry-upload',
+  baseRefName: 'main',
+  createdAt: '2026-09-20T00:00:00Z',
+  isDraft: false,
+  state: 'OPEN',
+};
+
+function installMocks(on: any, opts: { checkoutSucceeds?: boolean; remoteUrl?: string } = {}) {
   const checkoutSucceeds = opts.checkoutSucceeds ?? true;
+  const remoteUrl = opts.remoteUrl ?? REMOTE_URL;
 
   on('process.run', async ($: any, e: any, next: any) => {
     const [cmd, ...rest] = e.argv as string[];
@@ -24,7 +36,15 @@ function installMocks(on: any, opts: { checkoutSucceeds?: boolean } = {}) {
       return { value: { exitCode: 0, stdout: '/repo\n', stderr: '' } };
     }
     if (cmd === 'git' && rest[0] === 'remote') {
-      return { value: { exitCode: 0, stdout: REMOTE_URL + '\n', stderr: '' } };
+      return { value: { exitCode: 0, stdout: remoteUrl + '\n', stderr: '' } };
+    }
+    if (cmd === 'gh' && rest[0] === 'pr' && rest[1] === 'list') {
+      return { value: { exitCode: 0, stdout: JSON.stringify([GITHUB_PR_42]), stderr: '' } };
+    }
+    if (cmd === 'gh' && rest[0] === 'pr' && rest[1] === 'view') {
+      return {
+        value: { exitCode: 0, stdout: JSON.stringify({ ...GITHUB_PR_42, body: 'Retries the upload once on 5xx.' }), stderr: '' },
+      };
     }
     if (cmd === 'git' && rest[0] === 'branch') {
       return { value: { exitCode: 0, stdout: 'feature/trial-campaign\n', stderr: '' } };
@@ -89,12 +109,21 @@ function installMocks(on: any, opts: { checkoutSucceeds?: boolean } = {}) {
   });
 }
 
+const PANE_PROPS = {
+  title: 'PRs',
+  isFocused: true,
+  bodyColumns: 80,
+  placement: 'dock' as const,
+  scroll: { offset: 0, bodyRows: 40 },
+  view: {},
+};
+
 test('command.run pr reports a clear error outside an ADO repo', async ($: any, on: any) => {
   register(on, {});
   on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: 'not a git repository' } }));
 
   const result = await $.command.run({ command: 'prs', args: '' });
-  expect(result.text).toContain("isn't an Azure DevOps repo");
+  expect(result.text).toContain("isn't a GitHub or Azure DevOps repo");
 });
 
 test('bare /pr auto-detects the PR and opens a pane, with no inline text', async ($: any, on: any) => {
@@ -105,6 +134,25 @@ test('bare /pr auto-detects the PR and opens a pane, with no inline text', async
   expect(result.text).toBeUndefined();
 });
 
+test('a GitHub-remote repo lists and opens PRs via gh, not az/ADO', async ($: any, on: any) => {
+  register(on, {});
+  installMocks(on, { remoteUrl: 'https://github.com/octocat/widgets.git' });
+
+  const result = await $.command.run({ command: 'prs', args: '42' });
+  expect(result.text).toBeUndefined();
+
+  const ui = await $.ui.mount({
+    plugin: 'prs',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'prs',
+    props: PANE_PROPS,
+  });
+  expect(await ui.find({ text: /retry flaky upload/ })).toBeDefined();
+  expect(await ui.find({ text: /octocat/ })).toBeDefined();
+  await ui.unmount();
+});
+
 test('review view surfaces a checkout failure without erroring the command', async ($: any, on: any) => {
   register(on, {});
   installMocks(on, { checkoutSucceeds: false });
@@ -112,15 +160,6 @@ test('review view surfaces a checkout failure without erroring the command', asy
   const result = await $.command.run({ command: 'prs', args: '318' });
   expect(result.text).toBeUndefined();
 });
-
-const PANE_PROPS = {
-  title: 'PRs',
-  isFocused: true,
-  bodyColumns: 80,
-  placement: 'dock' as const,
-  scroll: { offset: 0, bodyRows: 40 },
-  view: {},
-};
 
 test('the docked pane draws the file list and reacts to a file press', async ($: any, on: any) => {
   register(on, {});

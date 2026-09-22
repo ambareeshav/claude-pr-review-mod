@@ -1,8 +1,8 @@
 # prs
 
-A Claude Code mod that browses and reviews Azure DevOps pull requests from
-inside a session, in a docked side panel — the same kind of panel `/diff`
-opens, via `/prs`.
+A Claude Code mod that browses and reviews pull requests — Azure DevOps or
+GitHub — from inside a session, in a docked side panel: the same kind of
+panel `/diff` opens, via `/prs`.
 
 ## Install
 
@@ -20,9 +20,15 @@ not into an already-running session) and `/prs` is available.
   docked panel; falls back to a browsable list of open PRs for the current
   repo if there isn't one.
 - `/prs <id>` — opens that PR directly.
-- `/prs --all` — a merged list across every Azure DevOps repo this session
-  has visited (only repos already resolved via a prior `/prs` call — there's
-  no cross-repo discovery).
+- `/prs --all` — a merged list across every repo (either provider) this
+  session has visited (only repos already resolved via a prior `/prs` call —
+  there's no cross-repo discovery).
+- Works against both **Azure DevOps** (`dev.azure.com`/`visualstudio.com`
+  remotes, via the REST API + `az`) and **GitHub** (`github.com` remotes,
+  via `gh pr list`/`gh pr view` — no separate token handling needed since
+  `gh` manages its own auth). The provider is detected from the repo's
+  `origin` remote automatically; everything past that point (diffing, the
+  file tree, the panel) is identical for both.
 - The panel: a `‹ back to PR list` button, the PR title/description/status,
   changed files as an indented folder tree with green/red `+N`/`-M` counts,
   and the selected file's diff (git's own hunks, boilerplate stripped).
@@ -34,11 +40,13 @@ slice, not an oversight.
 
 ## Setup
 
-1. Logged into Azure CLI: `az login` (checked at runtime; the mod never
-   calls it for you).
-2. Run from inside a git repo whose `origin` remote is an Azure DevOps URL
-   (`dev.azure.com/<org>/<project>/_git/<repo>`, the SSH form, or the legacy
-   `<org>.visualstudio.com` form).
+1. Logged into the relevant CLI: `az login` for Azure DevOps repos, `gh auth
+   login` for GitHub repos (checked at runtime; the mod never calls either
+   for you).
+2. Run from inside a git repo whose `origin` remote is either an Azure
+   DevOps URL (`dev.azure.com/<org>/<project>/_git/<repo>`, the SSH form, or
+   the legacy `<org>.visualstudio.com` form) or a GitHub URL
+   (`github.com/<owner>/<repo>`, HTTPS or SSH).
 
 For local development instead of the marketplace install above:
 `claude --plugin-dir /path/to/claude-pr-review-mod`, or symlink this folder
@@ -62,6 +70,15 @@ into `~/.claude/skills/prs` to auto-load every session.
   model to improvise with Bash — rather than ever reaching the hook. This
   plugin has no `commands/` folder at all; the hook is the only source of
   truth for `/prs`.
+- **GitHub support reuses everything except PR listing/metadata.**
+  `RepoContext` is a `{provider: 'ado', ado} | {provider: 'github', github}`
+  union resolved once from the `origin` remote (`lib/git.ts`); only
+  `listPullRequests`/`getPullRequest` dispatch on it. Diffing, the file
+  tree, and the panel never look at the provider — they only ever see
+  branch names, which is why GitHub support didn't touch `gitDiffFiles`,
+  `gitDiffForFile`, or any rendering code at all. GitHub's calls go through
+  `gh pr list`/`gh pr view --json ...`, not raw REST — `gh` already manages
+  its own auth, so there's no token-caching code to mirror `getAdoAccessToken`.
 - **Diffs and the file tree come from `git diff`, not the ADO REST API.**
   Both branches are already fetched locally for the checkout step, so `git
   diff origin/<target>...origin/<source>` gives `--numstat` (per-file
