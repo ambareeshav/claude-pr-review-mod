@@ -65,3 +65,9 @@ export function parseRemote(url: string): RepoContext | null {
 export function branchName(ref: string): string {
   return ref.replace('refs/heads/', '');
 }
+
+export function prWebUrl(ctx: RepoContext, id: number): string {
+  return ctx.provider === 'github'
+    ? `https://github.com/${ctx.github.owner}/${ctx.github.repo}/pull/${id}`
+    : `https://dev.azure.com/${encodeURIComponent(ctx.ado.org)}/${encodeURIComponent(ctx.ado.project)}/_git/${encodeURIComponent(ctx.ado.repo)}/pullrequest/${id}`;
+}

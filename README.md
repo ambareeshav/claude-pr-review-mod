@@ -38,6 +38,9 @@ not into an already-running session) and `/prs` is available.
     + subject) by default — click one to expand its full description in
     place, click again to collapse.
 - Opening a PR also best-effort checks out its source branch locally.
+- A `↗ open PR #… in browser` link in the header opens the real PR page
+  (`dev.azure.com/.../pullrequest/<id>` or `github.com/.../pull/<id>`) in
+  your default browser.
 
 Not yet implemented: posting comments, replying to threads, voting
 (approve/reject/wait). These need write scopes and are a deliberate next
@@ -126,6 +129,15 @@ into `~/.claude/skills/prs` to auto-load every session.
   pane's own `e.props.bodyColumns` reads as an actual TUI section rule. The
   header is split into separate title/branch/description `Markdown` blocks
   with a `Divider` between each, rather than one combined block.
+- **"Open in browser" is a plain `https:` link in a `Markdown` block, not a
+  shell-out.** No API in the generated types opens a URL/browser directly —
+  but per the docs, a link whose scheme *is* `https:`/`http:`/`file:` is
+  natively clickable and opens via the surface's own default behavior (a
+  link with any other scheme just draws as inert text). That's simpler and
+  more portable than shelling out to `open`/`xdg-open`/`start`, which would
+  need OS detection this mod otherwise has no reason to do. The URL itself
+  (`lib/git.ts`'s `prWebUrl`) is pure and provider-aware, same pattern as
+  everything else here.
 
 ## Verifying this plugin
 

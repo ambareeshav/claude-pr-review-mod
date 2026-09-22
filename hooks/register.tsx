@@ -1,4 +1,4 @@
-import { parseRemote, branchName } from './lib/git';
+import { parseRemote, branchName, prWebUrl } from './lib/git';
 import type { AdoRepoContext, GithubRepoContext, RepoContext } from './lib/git';
 import { adoBaseUrl, toPullRequestSummary, ADO_API_VERSION, ADO_RESOURCE_ID } from './lib/ado';
 import type { PullRequestSummary, PullRequestDetail } from './lib/ado';
@@ -467,6 +467,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
       <Markdown
         text={`${branchName(view.detail.sourceRefName)} → ${branchName(view.detail.targetRefName)} · ${view.detail.createdBy} · ${view.detail.status}${view.detail.isDraft ? ' · draft' : ''}`}
       />
+      <Markdown text={`[↗ open PR #${view.detail.pullRequestId} in browser](${prWebUrl(view.group.ctx, view.detail.pullRequestId)})`} />
       {view.checkoutMessage && (
         <>
           <Divider />
