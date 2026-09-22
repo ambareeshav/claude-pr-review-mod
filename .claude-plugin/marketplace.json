@@ -1,0 +1,15 @@
+{
+  "name": "prs",
+  "owner": { "name": "Ambareesha Vittal" },
+  "metadata": { "description": "prs: browse and review Azure DevOps pull requests from inside Claude Code" },
+  "plugins": [
+    {
+      "name": "prs",
+      "source": "./",
+      "description": "Browse and review Azure DevOps pull requests from inside Claude Code via /prs",
+      "homepage": "https://github.com/ambareeshav/claude-pr-review-mod",
+      "repository": "https://github.com/ambareeshav/claude-pr-review-mod",
+      "license": "MIT"
+    }
+  ]
+}
