@@ -334,6 +334,9 @@ async function loadDiffForSelected($: any, view: Extract<ViewState, { mode: 'rev
 function renderView($: any, e: any, options: any, view: ViewState) {
   const { Box, Text, Markdown, Button } = $.ui.resolve(e);
   const ttlMinutes = ttlMinutesFrom(options);
+  // `gap` on Box doesn't produce a visible blank row here, so sections are
+  // separated with an explicit one-row-tall empty Box instead.
+  const Spacer = () => <Box height={1} />;
 
   if (view.mode === 'error') {
     return <Markdown text={`**/prs error:** ${view.message}`} />;
@@ -342,9 +345,10 @@ function renderView($: any, e: any, options: any, view: ViewState) {
   if (view.mode === 'browser' || view.mode === 'browser-all') {
     const groups = view.mode === 'browser' ? [{ group: view.group, prs: view.prs }] : view.groups;
     return (
-      <Box flexDirection="column" gap={1}>
-        {groups.map(({ group, prs }) => (
+      <Box flexDirection="column">
+        {groups.map(({ group, prs }, i) => (
           <Box key={`group:${group.label}`} flexDirection="column">
+            {i > 0 && <Spacer />}
             <Markdown text={`### ${group.label}`} />
             {prs.length === 0 && <Markdown text="_no active pull requests_" />}
             {prs.map((pr) => (
@@ -384,12 +388,13 @@ function renderView($: any, e: any, options: any, view: ViewState) {
   let content: any;
   if (view.activeTab === 'commits') {
     content = (
-      <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column">
         {view.commits.length === 0 && <Markdown text="_no commits on this branch_" />}
-        {view.commits.map((c) => {
+        {view.commits.map((c, i) => {
           const expanded = view.expandedShas.has(c.sha);
           return (
             <Box key={`commit:${c.sha}`} flexDirection="column">
+              {i > 0 && <Spacer />}
               <Button
                 key={`commit:${c.sha}`}
                 plain
@@ -418,7 +423,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
     const treeRows = buildFileTreeRows(view.files);
 
     content = (
-      <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column">
         <Box flexDirection="column">
           {treeRows.map((row) =>
             row.kind === 'dir' ? (
@@ -447,13 +452,14 @@ function renderView($: any, e: any, options: any, view: ViewState) {
             ),
           )}
         </Box>
+        <Spacer />
         <Markdown text={diffText} />
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="column" gap={1}>
+    <Box flexDirection="column">
       <Button
         key="back"
         plain
@@ -462,11 +468,14 @@ function renderView($: any, e: any, options: any, view: ViewState) {
           goBackToBrowser($, ttlMinutes, view.group).then(() => $.ui.invalidate('ui.render'));
         }}
       />
+      <Spacer />
       <Markdown text={header} />
+      <Spacer />
       <Box flexDirection="row" columnGap={2}>
         {tabButton('files', 'Files')}
         {tabButton('commits', `Commits (${view.commits.length})`)}
       </Box>
+      <Spacer />
       {content}
     </Box>
   );
