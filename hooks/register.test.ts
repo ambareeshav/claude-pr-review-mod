@@ -195,6 +195,7 @@ test('the docked pane draws the file list and reacts to a file press', async ($:
   expect(await ui.find({ text: /new-file\.ts/ })).toBeDefined();
   expect(await ui.find({ text: '+3' })).toBeDefined();
   expect(await ui.find({ text: '-1' })).toBeDefined();
+  expect(await ui.find({ text: /^─{10,}$/ })).toBeDefined();
 
   await ui.press({ key: 'file:src/new-file.ts' });
   expect(await ui.find({ text: /new line/ })).toBeDefined();

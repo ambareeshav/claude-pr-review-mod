@@ -119,11 +119,13 @@ into `~/.claude/skills/prs` to auto-load every session.
 - **Diff text is capped at 9000 chars.** `Markdown` elements cap at 10000
   characters; a large file's diff is truncated with a note rather than
   silently failing to render.
-- **Section spacing is an explicit one-row `Box`, not `gap`.** `Box`'s `gap`
-  prop is declared in the generated types but produced no visible blank row
-  between siblings in practice; a small `Spacer = () => <Box height={1} />`
-  inserted between sections does. (The blank lines *within* the header are
-  from `Markdown`'s own block spacing, unrelated to either.)
+- **Sections are separated by a real horizontal rule, not blank rows.**
+  `Box`'s `gap` prop produced no visible blank row between siblings in
+  practice, and a blank-row spacer read as too subtle anyway — a
+  `Divider = () => <Text dimColor>{'─'.repeat(width)}</Text>` sized to the
+  pane's own `e.props.bodyColumns` reads as an actual TUI section rule. The
+  header is split into separate title/branch/description `Markdown` blocks
+  with a `Divider` between each, rather than one combined block.
 
 ## Verifying this plugin
 

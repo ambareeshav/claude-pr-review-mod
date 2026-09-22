@@ -334,9 +334,9 @@ async function loadDiffForSelected($: any, view: Extract<ViewState, { mode: 'rev
 function renderView($: any, e: any, options: any, view: ViewState) {
   const { Box, Text, Markdown, Button } = $.ui.resolve(e);
   const ttlMinutes = ttlMinutesFrom(options);
-  // `gap` on Box doesn't produce a visible blank row here, so sections are
-  // separated with an explicit one-row-tall empty Box instead.
-  const Spacer = () => <Box height={1} />;
+  // A visible section rule — `gap` on Box produced no visible blank row here.
+  const dividerWidth = Math.max(1, (e.props as any)?.bodyColumns ?? 60);
+  const Divider = () => <Text dimColor>{'─'.repeat(dividerWidth)}</Text>;
 
   if (view.mode === 'error') {
     return <Markdown text={`**/prs error:** ${view.message}`} />;
@@ -348,7 +348,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
       <Box flexDirection="column">
         {groups.map(({ group, prs }, i) => (
           <Box key={`group:${group.label}`} flexDirection="column">
-            {i > 0 && <Spacer />}
+            {i > 0 && <Divider />}
             <Markdown text={`### ${group.label}`} />
             {prs.length === 0 && <Markdown text="_no active pull requests_" />}
             {prs.map((pr) => (
@@ -365,13 +365,6 @@ function renderView($: any, e: any, options: any, view: ViewState) {
       </Box>
     );
   }
-
-  const header =
-    `### #${view.detail.pullRequestId} ${view.detail.title}\n` +
-    `${branchName(view.detail.sourceRefName)} → ${branchName(view.detail.targetRefName)} · ` +
-    `${view.detail.createdBy} · ${view.detail.status}${view.detail.isDraft ? ' · draft' : ''}` +
-    (view.checkoutMessage ? `\n\n_${view.checkoutMessage}_` : '') +
-    `\n\n${view.detail.description || '_no description_'}`;
 
   const tabButton = (tab: ReviewTab, label: string) => (
     <Button
@@ -394,7 +387,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
           const expanded = view.expandedShas.has(c.sha);
           return (
             <Box key={`commit:${c.sha}`} flexDirection="column">
-              {i > 0 && <Spacer />}
+              {i > 0 && <Divider />}
               <Button
                 key={`commit:${c.sha}`}
                 plain
@@ -452,7 +445,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
             ),
           )}
         </Box>
-        <Spacer />
+        <Divider />
         <Markdown text={diffText} />
       </Box>
     );
@@ -468,14 +461,26 @@ function renderView($: any, e: any, options: any, view: ViewState) {
           goBackToBrowser($, ttlMinutes, view.group).then(() => $.ui.invalidate('ui.render'));
         }}
       />
-      <Spacer />
-      <Markdown text={header} />
-      <Spacer />
+      <Divider />
+      <Markdown text={`#${view.detail.pullRequestId} ${view.detail.title}`} />
+      <Divider />
+      <Markdown
+        text={`${branchName(view.detail.sourceRefName)} → ${branchName(view.detail.targetRefName)} · ${view.detail.createdBy} · ${view.detail.status}${view.detail.isDraft ? ' · draft' : ''}`}
+      />
+      {view.checkoutMessage && (
+        <>
+          <Divider />
+          <Text color="yellow">{view.checkoutMessage}</Text>
+        </>
+      )}
+      <Divider />
+      <Markdown text={view.detail.description || '_no description_'} />
+      <Divider />
       <Box flexDirection="row" columnGap={2}>
         {tabButton('files', 'Files')}
         {tabButton('commits', `Commits (${view.commits.length})`)}
       </Box>
-      <Spacer />
+      <Divider />
       {content}
     </Box>
   );
