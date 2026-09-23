@@ -1,8 +1,6 @@
 # prs
 
-A Claude Code mod that browses and reviews pull requests — Azure DevOps or
-GitHub — from inside a session, in a docked side panel: the same kind of
-panel `/diff` opens, via `/prs`.
+Stop tab-switching to check on your PR. `/prs` docks the whole review — diff, file tree, commits — right beside your Claude Code session, for Azure DevOps or GitHub, so "just checking the PR real quick" stops being a five-minute round trip through the browser.
 
 ## Install
 
