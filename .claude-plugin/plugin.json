@@ -1,6 +1,6 @@
 {
   "name": "prs",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Browse and review Azure DevOps pull requests from inside Claude Code via /prs",
   "author": { "name": "Ambareesha Vittal" },
   "homepage": "https://github.com/ambareeshav/claude-pr-review-mod",

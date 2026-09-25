@@ -1,6 +1,6 @@
-# prs
+# Claude Code PR Review Mod
 
-Stop tab-switching to check on your PR. `/prs` docks the whole review — diff, file tree, commits — right beside your Claude Code session, for Azure DevOps or GitHub, so "just checking the PR real quick" stops being a five-minute round trip through the browser.
+A pull request review plugin for Claude Code, built as a function-hooks mod. Stop tab-switching to check on your PR. `/prs` docks the whole review — diff, file tree, commits — right beside your Claude Code session, for Azure DevOps or GitHub, so "just checking the PR real quick" stops being a five-minute round trip through the browser.
 
 ## Install
 
