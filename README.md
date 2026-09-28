@@ -5,9 +5,11 @@ A pull request review plugin for Claude Code, built as a function-hooks mod. Sto
 ## Install
 
 ```
-claude plugin marketplace add ambareeshav/claude-pr-review-mod
-claude plugin install prs@prs
+claude plugin marketplace add ambareeshav/claude-plugins
+claude plugin install prs@ambareeshav
 ```
+
+This adds [all my plugins](https://github.com/ambareeshav/claude-plugins) as one marketplace. To add only this repo instead, use `claude plugin marketplace add ambareeshav/claude-pr-review-mod` and `claude plugin install prs@prs`.
 
 Restart Claude Code (a full quit/relaunch — plugins load at session start,
 not into an already-running session) and `/prs` is available.
