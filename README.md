@@ -27,12 +27,14 @@ claude plugin install prs@ambareeshav
 ## What it does (v0.1 — read-only slice)
 
 - `/prs` — auto-detects the PR for the current branch and opens it in a
-  docked panel; falls back to a browsable list of open PRs for the current
-  repo if there isn't one.
-- `/prs <id>` — opens that PR directly.
-- `/prs --all` — a merged list across every repo (either provider) this
-  session has visited (only repos already resolved via a prior `/prs` call —
-  there's no cross-repo discovery).
+  docked panel; falls back to a browsable list of open PRs if there isn't one.
+- The list covers every repo in the session: the one you started in plus any
+  added with `/add-dir` (or `additionalDirectories` in settings). Each repo
+  has a bold header you can collapse, with **Expand all** / **Collapse all**
+  above them and a divider between repos. A repo whose PRs can't load shows
+  its error under its own header instead of failing the whole list.
+- `/prs <id>` — opens that PR (in the current repo) directly.
+- `/prs --all` — always shows the list, even when the current branch has a PR.
 - Works against both **Azure DevOps** (`dev.azure.com`/`visualstudio.com`
   remotes, via the REST API + `az`) and **GitHub** (`github.com` remotes,
   via `gh pr list`/`gh pr view` — no separate token handling needed since
@@ -176,6 +178,6 @@ into `~/.claude/skills/prs` to auto-load every session.
   this as a non-fatal note in the panel and still shows the diff (which
   comes from fetched refs, not the working tree) — but you won't get a
   local checkout to poke at until the other worktree moves off that branch.
-- **`--all` only knows repos visited this session** (in-memory registry,
-  reset on plugin reload) — there's no repo auto-discovery.
+- **Collapsed repos reset on plugin reload** (the collapse state is in
+  memory only).
 - Comments, replies, and voting are unimplemented (next slice).

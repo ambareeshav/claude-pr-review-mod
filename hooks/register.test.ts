@@ -14,6 +14,19 @@ const PR_318 = {
   isDraft: false,
 };
 
+const PR_77 = {
+  pullRequestId: 77,
+  title: 'fix: stream timeout',
+  status: 'active',
+  createdBy: { displayName: 'sairaam' },
+  sourceRefName: 'refs/heads/fix/stream-timeout',
+  targetRefName: 'refs/heads/dev',
+  creationDate: '2026-09-22',
+  isDraft: false,
+};
+
+const API_REMOTE = 'https://dev.azure.com/aether-engineering/app-deployments/_git/api-backend';
+
 const GITHUB_PR_42 = {
   number: 42,
   title: 'fix: retry flaky upload',
@@ -41,6 +54,9 @@ function installMocks(
     azCalls?: string[][];
     fetchNeedsBearer?: boolean;
     fetchEnvs?: Record<string, string>[];
+    // dir -> origin URL, for a session spanning several repos; the first is the session's cwd.
+    repos?: Record<string, string>;
+    transcript?: string[];
   } = {},
 ) {
   const checkoutSucceeds = opts.checkoutSucceeds ?? true;
@@ -50,11 +66,18 @@ function installMocks(
   on('process.run', async ($: any, e: any, next: any) => {
     const [cmd, ...rest] = e.argv as string[];
 
+    const cwd = e.init?.cwd as string | undefined;
     if (cmd === 'git' && rest[0] === 'rev-parse') {
-      return { value: { exitCode: 0, stdout: '/repo\n', stderr: '' } };
+      if (!opts.repos) return { value: { exitCode: 0, stdout: '/repo\n', stderr: '' } };
+      return cwd && opts.repos[cwd]
+        ? { value: { exitCode: 0, stdout: cwd + '\n', stderr: '' } }
+        : { value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } };
     }
     if (cmd === 'git' && rest[0] === 'remote') {
-      return { value: { exitCode: 0, stdout: remoteUrl + '\n', stderr: '' } };
+      const url = opts.repos ? cwd && opts.repos[cwd] : remoteUrl;
+      return url
+        ? { value: { exitCode: 0, stdout: url + '\n', stderr: '' } }
+        : { value: { exitCode: 2, stdout: '', stderr: 'no such remote' } };
     }
     if (cmd === 'gh' && rest[0] === 'pr' && rest[1] === 'list') {
       return { value: { exitCode: 0, stdout: JSON.stringify([GITHUB_PR_42]), stderr: '' } };
@@ -130,6 +153,9 @@ function installMocks(
     return { value: { exitCode: 1, stdout: '', stderr: `unmocked argv: ${e.argv.join(' ')}` } };
   });
 
+  on('session.cwd', async () => ({ value: opts.repos ? Object.keys(opts.repos)[0] : '/repo' }));
+  on('session.messages', async () => ({ value: (opts.transcript ?? []).map((text) => ({ role: 'user', text, toolUses: [] })) }));
+  on('settings.read', async () => ({ value: {} }));
   on('store.get', async () => ({ value: undefined }));
   on('store.set', async () => ({ value: undefined }));
   on('ui.open', async () => ({ value: undefined }));
@@ -149,7 +175,8 @@ function installMocks(
       return signIn(opts.orgTenant);
     }
     if (url.includes('/pullrequests?')) {
-      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ value: [PR_318] }) } };
+      const prs = opts.repos && url.includes('/repositories/api-backend/') ? [PR_77] : [PR_318];
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ value: prs }) } };
     }
     if (/\/pullrequests\/318\?/.test(url)) {
       return {
@@ -312,4 +339,50 @@ test('ADO git fetch authenticates with the az token instead of prompting for a p
   const ui = await $.ui.mount({ plugin: 'prs', surface: 'terminal', component: 'Pane', requestId: 'prs', props: PANE_PROPS });
   expect(await ui.find({ text: /couldn't fetch/ })).toBeUndefined();
   expect(await ui.find({ text: /app\.ts/ })).toBeDefined();
+});
+
+const TWO_REPOS = { '/api': API_REMOTE, '/web': REMOTE_URL };
+const ADD_DIR_WEB = '<command-name>/add-dir</command-name>\n<command-message>add-dir</command-message>\n<command-args>/web/</command-args>';
+
+async function mountPane($: any) {
+  return $.ui.mount({ plugin: 'prs', surface: 'terminal', component: 'Pane', requestId: 'prs', props: PANE_PROPS });
+}
+
+test('repos added with /add-dir show their PRs under bold repo headers with a divider between', async ($: any, on: any) => {
+  register(on, {});
+  installMocks(on, { repos: TWO_REPOS, transcript: [ADD_DIR_WEB] });
+
+  const result = await $.command.run({ command: 'prs', args: '' });
+  expect(result.text).toBeUndefined();
+
+  const ui = await mountPane($);
+  const api = await ui.find({ type: 'Text', text: 'app-deployments/api-backend' });
+  const web = await ui.find({ type: 'Text', text: 'app-deployments/web-frontend' });
+  expect(api?.props.bold).toBe(true);
+  expect(web?.props.bold).toBe(true);
+
+  const row = await ui.find({ key: 'open:/web:318' });
+  expect(row?.text).toContain('trial campaign admin UI');
+  expect(row?.props.plain).toBe(true);
+  expect(await ui.find({ key: 'open:/api:77' })).toBeDefined();
+  expect(await ui.find({ text: /^─{10,}$/ })).toBeDefined();
+});
+
+test('each repo collapses on its own, and expand all / collapse all act on every repo', async ($: any, on: any) => {
+  register(on, {});
+  installMocks(on, { repos: TWO_REPOS, transcript: [ADD_DIR_WEB] });
+  await $.command.run({ command: 'prs', args: '--all' });
+  const ui = await mountPane($);
+
+  await ui.press({ key: 'toggle:/web' });
+  expect(await ui.find({ key: 'open:/web:318' })).toBeUndefined();
+  expect(await ui.find({ key: 'open:/api:77' })).toBeDefined();
+
+  await ui.press({ key: 'collapse-all' });
+  expect(await ui.find({ key: 'open:/api:77' })).toBeUndefined();
+  expect(await ui.find({ type: 'Text', text: 'app-deployments/api-backend' })).toBeDefined();
+
+  await ui.press({ key: 'expand-all' });
+  expect(await ui.find({ key: 'open:/web:318' })).toBeDefined();
+  expect(await ui.find({ key: 'open:/api:77' })).toBeDefined();
 });

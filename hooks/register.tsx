@@ -15,6 +15,7 @@ import { cleanUnifiedDiff } from './lib/diff';
 
 const TOKEN_STORE_KEY = 'prs:ado-token';
 const TENANT_STORE_KEY = 'prs:ado-tenant';
+const DIRS_STORE_KEY = 'prs:dirs';
 const PANE_ID = 'prs';
 const MAX_DIFF_CHARS = 9000; // Markdown elements cap at 10000 chars
 
@@ -24,10 +25,11 @@ type CommitInfo = { sha: string; subject: string; body: string };
 
 type ReviewTab = 'files' | 'commits';
 
+type BrowserGroup = { group: RepoGroup; prs: PullRequestSummary[]; error?: string };
+
 type ViewState =
   | { mode: 'error'; message: string }
-  | { mode: 'browser'; group: RepoGroup; prs: PullRequestSummary[] }
-  | { mode: 'browser-all'; groups: { group: RepoGroup; prs: PullRequestSummary[] }[] }
+  | { mode: 'browser'; groups: BrowserGroup[] }
   | {
       mode: 'review';
       group: RepoGroup;
@@ -44,6 +46,8 @@ type ViewState =
 
 let currentView: ViewState | null = null;
 const repoRegistry = new Map<string, RepoGroup>();
+// Repo roots collapsed in the browser; module state, so a reload expands all.
+const collapsedRoots = new Set<string>();
 
 function repoLabel(ctx: RepoContext): string {
   return ctx.provider === 'github' ? `${ctx.github.owner}/${ctx.github.repo}` : `${ctx.ado.project}/${ctx.ado.repo}`;
@@ -62,10 +66,9 @@ function ttlMinutesFrom(options: any): number {
 function summaryText(view: ViewState | null): string {
   if (!view) return '/prs: nothing to show';
   if (view.mode === 'error') return `/prs: ${view.message}`;
-  if (view.mode === 'browser') return `/prs: ${view.prs.length} open PR(s) in ${view.group.label}`;
-  if (view.mode === 'browser-all') {
+  if (view.mode === 'browser') {
     const total = view.groups.reduce((n, g) => n + g.prs.length, 0);
-    return `/prs --all: ${total} open PR(s) across ${view.groups.length} repo(s)`;
+    return `/prs: ${total} open PR(s) across ${view.groups.length} repo(s)`;
   }
   return `/prs ${view.detail.pullRequestId}: ${view.detail.title}`;
 }
@@ -82,8 +85,8 @@ async function run(
   return $.process.run(argv, Object.keys(init).length ? init : undefined);
 }
 
-async function resolveRepoContext($: any): Promise<{ root: string; ctx: RepoContext } | null> {
-  const toplevel = await run($, ['git', 'rev-parse', '--show-toplevel']);
+async function resolveRepoContext($: any, dir: string): Promise<{ root: string; ctx: RepoContext } | null> {
+  const toplevel = await run($, ['git', 'rev-parse', '--show-toplevel'], dir);
   if (toplevel.exitCode !== 0) return null;
   const root = toplevel.stdout.trim();
   const remote = await run($, ['git', 'remote', 'get-url', 'origin'], root);
@@ -93,8 +96,14 @@ async function resolveRepoContext($: any): Promise<{ root: string; ctx: RepoCont
   return { root, ctx };
 }
 
-async function ensureRepoGroup($: any): Promise<RepoGroup | null> {
-  const resolved = await resolveRepoContext($);
+async function sessionCwd($: any): Promise<string | undefined> {
+  return $.session.cwd().catch(() => undefined);
+}
+
+async function ensureRepoGroup($: any, dir?: string): Promise<RepoGroup | null> {
+  const where = dir ?? (await sessionCwd($));
+  if (!where) return null;
+  const resolved = await resolveRepoContext($, where);
   if (!resolved) return null;
   const existing = repoRegistry.get(resolved.root);
   if (existing) return existing;
@@ -307,6 +316,73 @@ async function getGithubPullRequest($: any, gh: GithubRepoContext, id: number): 
   return { ...toGithubSummary(pr), description: pr.body ?? '' };
 }
 
+// --- the session's repos -------------------------------------------------
+
+// Directories the session works in beyond its cwd. /add-dir raises
+// DirectoryAdded, kept per session in the store so a reload keeps them; the
+// transcript's /add-dir lines and the settings' additionalDirectories cover
+// what was added before this module loaded.
+async function rememberDir($: any, dir: string): Promise<void> {
+  const id = await $.session.id().catch(() => 'unknown');
+  const key = `${DIRS_STORE_KEY}:${id}`;
+  const dirs = ((await $.store.get(key)) as string[] | undefined) ?? [];
+  if (!dirs.includes(dir)) await $.store.set(key, [...dirs, dir]);
+}
+
+async function storedDirs($: any): Promise<string[]> {
+  const id = await $.session.id().catch(() => 'unknown');
+  return ((await $.store.get(`${DIRS_STORE_KEY}:${id}`).catch(() => undefined)) as string[] | undefined) ?? [];
+}
+
+const ADD_DIR_IN_TRANSCRIPT = /<command-name>\/add-dir<\/command-name>[\s\S]*?<command-args>([^<]+)<\/command-args>/g;
+
+async function transcriptDirs($: any): Promise<string[]> {
+  const messages = ((await $.session.messages().catch(() => [])) ?? []) as { role: string; text: string }[];
+  const dirs: string[] = [];
+  for (const m of messages) {
+    if (m.role !== 'user' || !m.text?.includes('/add-dir')) continue;
+    for (const match of m.text.matchAll(ADD_DIR_IN_TRANSCRIPT)) {
+      const dir = match[1]?.trim();
+      if (dir) dirs.push(dir);
+    }
+  }
+  return dirs;
+}
+
+async function settingsDirs($: any): Promise<string[]> {
+  const settings = (await $.settings.read().catch(() => ({}))) as any;
+  const dirs = settings?.permissions?.additionalDirectories;
+  return Array.isArray(dirs) ? dirs.filter((d: unknown): d is string => typeof d === 'string') : [];
+}
+
+// Every GitHub or ADO repo the session can see, the cwd's first.
+async function sessionRepoGroups($: any): Promise<RepoGroup[]> {
+  const cwd = await sessionCwd($);
+  const extra = [...(await storedDirs($)), ...(await transcriptDirs($)), ...(await settingsDirs($))];
+  const dirs = [...new Set([...(cwd ? [cwd] : []), ...extra.map((d) => d.replace(/\/+$/, '') || '/')])];
+  const groups: RepoGroup[] = [];
+  for (const dir of dirs) {
+    const group = await ensureRepoGroup($, dir);
+    if (group && !groups.some((g) => g.root === group.root)) groups.push(group);
+  }
+  for (const group of repoRegistry.values()) {
+    if (!groups.some((g) => g.root === group.root)) groups.push(group);
+  }
+  return groups;
+}
+
+async function loadBrowser($: any, ttlMinutes: number, groups: RepoGroup[]): Promise<ViewState> {
+  const loaded: BrowserGroup[] = [];
+  for (const group of groups) {
+    try {
+      loaded.push({ group, prs: await listPullRequests($, group, ttlMinutes) });
+    } catch (err: any) {
+      loaded.push({ group, prs: [], error: err?.message ?? String(err) });
+    }
+  }
+  return { mode: 'browser', groups: loaded };
+}
+
 // --- provider dispatch ------------------------------------------------
 
 async function listPullRequests($: any, group: RepoGroup, ttlMinutes: number): Promise<PullRequestSummary[]> {
@@ -360,8 +436,8 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
   if (view.selectedPath) await loadDiffForSelected($, view);
 }
 
-async function goBackToBrowser($: any, ttlMinutes: number, group: RepoGroup): Promise<void> {
-  currentView = { mode: 'browser', group, prs: await listPullRequests($, group, ttlMinutes) };
+async function goBackToBrowser($: any, ttlMinutes: number): Promise<void> {
+  currentView = await loadBrowser($, ttlMinutes, await sessionRepoGroups($));
 }
 
 async function loadDiffForSelected($: any, view: Extract<ViewState, { mode: 'review' }>): Promise<void> {
@@ -392,26 +468,56 @@ function renderView($: any, e: any, options: any, view: ViewState) {
     return <Markdown text={`**/prs error:** ${view.message}`} />;
   }
 
-  if (view.mode === 'browser' || view.mode === 'browser-all') {
-    const groups = view.mode === 'browser' ? [{ group: view.group, prs: view.prs }] : view.groups;
+  if (view.mode === 'browser') {
+    const redraw = () => $.ui.invalidate('ui.render');
     return (
       <Box flexDirection="column">
-        {groups.map(({ group, prs }, i) => (
-          <Box key={`group:${group.label}`} flexDirection="column">
-            {i > 0 && <Divider />}
-            <Markdown text={`### ${group.label}`} />
-            {prs.length === 0 && <Markdown text="_no active pull requests_" />}
-            {prs.map((pr) => (
-              <Button
-                key={`open:${group.label}:${pr.pullRequestId}`}
-                label={`#${pr.pullRequestId} ${pr.title} — ${pr.createdBy}${pr.isDraft ? ' (draft)' : ''}`}
-                onPress={() => {
-                  openReview($, ttlMinutes, group, pr.pullRequestId).then(() => $.ui.invalidate('ui.render'));
-                }}
-              />
-            ))}
+        {view.groups.length > 1 && (
+          <Box flexDirection="row" gap={1}>
+            <Button key="expand-all" label="Expand all" dimColor onPress={() => { collapsedRoots.clear(); redraw(); }} />
+            <Button
+              key="collapse-all"
+              label="Collapse all"
+              dimColor
+              onPress={() => { for (const g of view.groups) collapsedRoots.add(g.group.root); redraw(); }}
+            />
           </Box>
-        ))}
+        )}
+        {view.groups.map(({ group, prs, error }, i) => {
+          const collapsed = collapsedRoots.has(group.root);
+          return (
+            <Box key={`group:${group.root}`} flexDirection="column">
+              {(i > 0 || view.groups.length > 1) && <Divider />}
+              <Box flexDirection="row" gap={1}>
+                <Button
+                  key={`toggle:${group.root}`}
+                  label={collapsed ? '▸' : '▾'}
+                  plain
+                  onPress={() => {
+                    if (collapsed) collapsedRoots.delete(group.root);
+                    else collapsedRoots.add(group.root);
+                    redraw();
+                  }}
+                />
+                <Text bold>{group.label}</Text>
+                <Text dimColor>{error ? 'error' : `${prs.length} open`}</Text>
+              </Box>
+              {!collapsed && error && <Text color="red">{error}</Text>}
+              {!collapsed && !error && prs.length === 0 && <Text dimColor>no active pull requests</Text>}
+              {!collapsed &&
+                prs.map((pr) => (
+                  <Button
+                    key={`open:${group.root}:${pr.pullRequestId}`}
+                    label={`  #${pr.pullRequestId} ${pr.title} — ${pr.createdBy}${pr.isDraft ? ' (draft)' : ''}`}
+                    plain
+                    onPress={() => {
+                      openReview($, ttlMinutes, group, pr.pullRequestId).then(redraw);
+                    }}
+                  />
+                ))}
+            </Box>
+          );
+        })}
       </Box>
     );
   }
@@ -508,7 +614,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
         plain
         label="‹ back to PR list"
         onPress={() => {
-          goBackToBrowser($, ttlMinutes, view.group).then(() => $.ui.invalidate('ui.render'));
+          goBackToBrowser($, ttlMinutes).then(() => $.ui.invalidate('ui.render'));
         }}
       />
       <Divider />
@@ -543,14 +649,11 @@ async function handleCommandRun($: any, e: any, options: any): Promise<{ text: s
 
   try {
     if (args === '--all') {
-      const groups: { group: RepoGroup; prs: PullRequestSummary[] }[] = [];
-      for (const group of repoRegistry.values()) {
-        groups.push({ group, prs: await listPullRequests($, group, ttlMinutes) });
-      }
+      const groups = await sessionRepoGroups($);
       currentView =
         groups.length === 0
-          ? { mode: 'error', message: 'no GitHub or Azure DevOps repos seen yet this session — run /prs once from inside one first' }
-          : { mode: 'browser-all', groups };
+          ? { mode: 'error', message: 'no GitHub or Azure DevOps repos in this session — run /prs from inside one, or /add-dir one' }
+          : await loadBrowser($, ttlMinutes, groups);
     } else if (/^\d+$/.test(args)) {
       const group = await ensureRepoGroup($);
       if (!group) {
@@ -569,7 +672,7 @@ async function handleCommandRun($: any, e: any, options: any): Promise<{ text: s
         if (match) {
           await openReview($, ttlMinutes, group, match.pullRequestId);
         } else {
-          currentView = { mode: 'browser', group, prs };
+          currentView = await loadBrowser($, ttlMinutes, await sessionRepoGroups($));
         }
       }
     } else {
@@ -599,15 +702,21 @@ async function handleSessionStart($: any, e: any, next: any): Promise<any> {
   await $.command
     .register({
       name: 'prs',
-      description: 'Browse and review Azure DevOps pull requests',
+      description: 'Browse and review pull requests across the session\'s repos',
       argumentHint: '[id|--all]',
     })
     .catch((err: any) => $.ui.log(`prs: /prs not registered: ${err}`));
   return r;
 }
 
+async function handleDirectoryAdded($: any, e: any, next: any): Promise<any> {
+  if (typeof e.directory === 'string') await rememberDir($, e.directory).catch(() => undefined);
+  return next(e);
+}
+
 export function register(on: any, options: any) {
   on('session.start', ($: any, e: any, next: any) => handleSessionStart($, e, next));
   on('command.run', { command: 'prs' }, ($: any, e: any) => handleCommandRun($, e, options));
   on('ui.render', { component: 'Pane' }, ($: any, e: any, next: any) => handlePaneRender($, e, options, next));
+  on('classic.DirectoryAdded', ($: any, e: any, next: any) => handleDirectoryAdded($, e, next));
 }
