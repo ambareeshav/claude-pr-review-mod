@@ -59,6 +59,9 @@ function installMocks(
     // dir -> origin URL, for a session spanning several repos; the first is the session's cwd.
     repos?: Record<string, string>;
     transcript?: string[];
+    // branch -> path of a worktree that has it checked out
+    worktrees?: Record<string, string>;
+    checkoutCalls?: string[][];
   } = {},
 ) {
   const checkoutSucceeds = opts.checkoutSucceeds ?? true;
@@ -103,7 +106,14 @@ function installMocks(
       }
       return { value: { exitCode: 0, stdout: '', stderr: '' } };
     }
+    if (cmd === 'git' && rest[0] === 'worktree' && opts.worktrees) {
+      const blocks = [`worktree /repo\nHEAD aaaa\nbranch refs/heads/feature/KJR\n`].concat(
+        Object.entries(opts.worktrees).map(([b, path]) => `worktree ${path}\nHEAD bbbb\nbranch refs/heads/${b}\n`),
+      );
+      return { value: { exitCode: 0, stdout: blocks.join('\n'), stderr: '' } };
+    }
     if (cmd === 'git' && rest[0] === 'checkout') {
+      opts.checkoutCalls?.push(rest);
       return checkoutSucceeds
         ? { value: { exitCode: 0, stdout: '', stderr: '' } }
         : { value: { exitCode: 1, stdout: '', stderr: 'already checked out in another worktree' } };
@@ -403,4 +413,19 @@ test('the PR list paints a gradient background to the pane bottom, with short ce
   const between = await ui.findAll({ type: 'Text', text: /^\s*┄+\s*$/ });
   expect(between.length).toBe(1); // web-frontend's two PRs; none after a repo's last PR
   expect(between[0]!.text.trim().length).toBeLessThan(PANE_PROPS.bodyColumns / 2);
+});
+
+test('a PR branch already checked out in another worktree is noted, not reported as a failed checkout', async ($: any, on: any) => {
+  register(on, {});
+  const checkoutCalls: string[][] = [];
+  installMocks(on, { worktrees: { 'feature/trial-campaign': '/repo/.claude/worktrees/trial' }, checkoutCalls });
+
+  await $.command.run({ command: 'prs', args: '318' });
+  const ui = await mountPane($);
+  expect(checkoutCalls.length).toBe(0);
+  expect(await ui.find({ text: /couldn't check out/ })).toBeUndefined();
+  const note = await ui.find({ text: /checked out in worktree .*\/repo\/\.claude\/worktrees\/trial/ });
+  expect(note).toBeDefined();
+  expect(note!.props.color).toBeUndefined();
+  expect(await ui.find({ text: /app\.ts/ })).toBeDefined();
 });

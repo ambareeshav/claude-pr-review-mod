@@ -42,6 +42,7 @@ type ViewState =
       diffCache: Map<string, string>;
       loadingDiff: boolean;
       checkoutMessage: string | null;
+      checkoutNote: string | null;
     };
 
 let currentView: ViewState | null = null;
@@ -139,6 +140,20 @@ async function fetchBranches(
   }
   const res = await run($, ['git', 'fetch', 'origin', ...branches], group.root, env);
   return res.exitCode === 0 ? { ok: true } : { ok: false, message: res.stderr.trim().split('\n').pop() };
+}
+
+// Where `branch` is checked out, if in a worktree other than `root`: git
+// refuses a second checkout of it, and the review doesn't need one (the diff
+// comes from the fetched refs).
+async function worktreeHolding($: any, root: string, branch: string): Promise<string | null> {
+  const res = await run($, ['git', 'worktree', 'list', '--porcelain'], root);
+  if (res.exitCode !== 0) return null;
+  for (const block of res.stdout.split(/\n\n+/)) {
+    const path = /^worktree (.+)$/m.exec(block)?.[1];
+    const ref = /^branch (.+)$/m.exec(block)?.[1];
+    if (path && ref === `refs/heads/${branch}` && path !== root) return path;
+  }
+  return null;
 }
 
 async function checkoutBranch($: any, root: string, branch: string): Promise<{ ok: boolean; message?: string }> {
@@ -411,11 +426,17 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
     : [[], []];
 
   let checkoutMessage: string | null = null;
+  let checkoutNote: string | null = null;
   if (!fetched) {
     checkoutMessage = `couldn't fetch ${source} and ${target} from origin${fetch.message ? `: ${fetch.message}` : ''}`;
   } else {
-    const outcome = await checkoutBranch($, group.root, source);
-    if (!outcome.ok) checkoutMessage = `couldn't check out ${source}: ${outcome.message}`;
+    const holder = await worktreeHolding($, group.root, source);
+    if (holder) {
+      checkoutNote = `${source} is checked out in worktree ${holder}`;
+    } else {
+      const outcome = await checkoutBranch($, group.root, source);
+      if (!outcome.ok) checkoutMessage = `couldn't check out ${source}: ${outcome.message}`;
+    }
   }
 
   const view: ViewState = {
@@ -430,6 +451,7 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
     diffCache: new Map(),
     loadingDiff: false,
     checkoutMessage,
+    checkoutNote,
   };
   currentView = view;
 
@@ -717,6 +739,12 @@ function renderView($: any, e: any, options: any, view: ViewState) {
         <>
           <Divider />
           <Text color="yellow">{view.checkoutMessage}</Text>
+        </>
+      )}
+      {view.checkoutNote && (
+        <>
+          <Divider />
+          <Text dimColor>{view.checkoutNote}</Text>
         </>
       )}
       <Divider />
