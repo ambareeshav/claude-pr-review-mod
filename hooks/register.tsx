@@ -72,8 +72,14 @@ function summaryText(view: ViewState | null): string {
 
 // --- process / git ----------------------------------------------------
 
-async function run($: any, argv: string[], cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return $.process.run(argv, cwd ? { cwd } : undefined);
+async function run(
+  $: any,
+  argv: string[],
+  cwd?: string,
+  env?: Record<string, string>,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const init = { ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) };
+  return $.process.run(argv, Object.keys(init).length ? init : undefined);
 }
 
 async function resolveRepoContext($: any): Promise<{ root: string; ctx: RepoContext } | null> {
@@ -103,9 +109,27 @@ async function currentBranch($: any, cwd: string): Promise<string | null> {
   return res.exitCode === 0 && name ? name : null;
 }
 
-async function fetchBranches($: any, root: string, branches: string[]): Promise<boolean> {
-  const res = await run($, ['git', 'fetch', 'origin', ...branches], root);
-  return res.exitCode === 0;
+// The pane runs git with no terminal, so git can't ask for a password. For ADO,
+// hand git the same az token the REST calls use, through env-only git config
+// (not argv, so it stays out of the process list).
+async function fetchBranches(
+  $: any,
+  group: RepoGroup,
+  ttlMinutes: number,
+  branches: string[],
+): Promise<{ ok: boolean; message?: string }> {
+  const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+  if (group.ctx.provider === 'ado') {
+    const tenant = await resolveAdoTenant($, group.ctx.ado.org);
+    const token = await getAdoAccessToken($, ttlMinutes, tenant);
+    Object.assign(env, {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+    });
+  }
+  const res = await run($, ['git', 'fetch', 'origin', ...branches], group.root, env);
+  return res.exitCode === 0 ? { ok: true } : { ok: false, message: res.stderr.trim().split('\n').pop() };
 }
 
 async function checkoutBranch($: any, root: string, branch: string): Promise<{ ok: boolean; message?: string }> {
@@ -304,14 +328,15 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
   const source = branchName(detail.sourceRefName);
   const target = branchName(detail.targetRefName);
 
-  const fetched = await fetchBranches($, group.root, [source, target]);
+  const fetch = await fetchBranches($, group, ttlMinutes, [source, target]);
+  const fetched = fetch.ok;
   const [files, commits] = fetched
     ? await Promise.all([gitDiffFiles($, group.root, target, source), gitCommitsBetween($, group.root, target, source)])
     : [[], []];
 
   let checkoutMessage: string | null = null;
   if (!fetched) {
-    checkoutMessage = `couldn't fetch ${source}/${target} from origin`;
+    checkoutMessage = `couldn't fetch ${source} and ${target} from origin${fetch.message ? `: ${fetch.message}` : ''}`;
   } else {
     const outcome = await checkoutBranch($, group.root, source);
     if (!outcome.ok) checkoutMessage = `couldn't check out ${source}: ${outcome.message}`;

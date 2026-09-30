@@ -33,7 +33,15 @@ const SIGN_IN_PAGE = (tenant: string) =>
 // sign-in page ADO really sends. azCalls collects every az argv.
 function installMocks(
   on: any,
-  opts: { checkoutSucceeds?: boolean; remoteUrl?: string; orgTenant?: string; tenantDiscoverable?: boolean; azCalls?: string[][] } = {},
+  opts: {
+    checkoutSucceeds?: boolean;
+    remoteUrl?: string;
+    orgTenant?: string;
+    tenantDiscoverable?: boolean;
+    azCalls?: string[][];
+    fetchNeedsBearer?: boolean;
+    fetchEnvs?: Record<string, string>[];
+  } = {},
 ) {
   const checkoutSucceeds = opts.checkoutSucceeds ?? true;
   const remoteUrl = opts.remoteUrl ?? REMOTE_URL;
@@ -60,6 +68,14 @@ function installMocks(
       return { value: { exitCode: 0, stdout: 'feature/trial-campaign\n', stderr: '' } };
     }
     if (cmd === 'git' && rest[0] === 'fetch') {
+      const env = (e.init?.env ?? {}) as Record<string, string>;
+      opts.fetchEnvs?.push(env);
+      // Like a real non-interactive git with no cached ADO credential.
+      if (opts.fetchNeedsBearer && !/^Authorization: Bearer /.test(env.GIT_CONFIG_VALUE_0 ?? '')) {
+        return {
+          value: { exitCode: 128, stdout: '', stderr: "fatal: could not read Password for 'https://org@dev.azure.com': Device not configured" },
+        };
+      }
       return { value: { exitCode: 0, stdout: '', stderr: '' } };
     }
     if (cmd === 'git' && rest[0] === 'checkout') {
@@ -280,4 +296,20 @@ test('a sign-in page instead of JSON is reported as an auth problem, not a parse
   expect(result.text).not.toContain('JSON Parse');
   expect(result.text).toContain('sign-in page');
   expect(result.text).toContain('az login');
+});
+
+test('ADO git fetch authenticates with the az token instead of prompting for a password', async ($: any, on: any) => {
+  register(on, {});
+  const fetchEnvs: Record<string, string>[] = [];
+  installMocks(on, { fetchNeedsBearer: true, fetchEnvs });
+
+  const result = await $.command.run({ command: 'prs', args: '318' });
+  expect(result.text).toBeUndefined();
+  expect(fetchEnvs[0]?.GIT_TERMINAL_PROMPT).toBe('0');
+  expect(fetchEnvs[0]?.GIT_CONFIG_KEY_0).toBe('http.extraHeader');
+  expect(fetchEnvs[0]?.GIT_CONFIG_VALUE_0).toBe('Authorization: Bearer fake-token');
+
+  const ui = await $.ui.mount({ plugin: 'prs', surface: 'terminal', component: 'Pane', requestId: 'prs', props: PANE_PROPS });
+  expect(await ui.find({ text: /couldn't fetch/ })).toBeUndefined();
+  expect(await ui.find({ text: /app\.ts/ })).toBeDefined();
 });
