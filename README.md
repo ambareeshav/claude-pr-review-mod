@@ -105,14 +105,19 @@ into `~/.claude/skills/prs` to auto-load every session.
   fetched for diffing, so no `gh pr view --json commits` / ADO `commits`
   endpoint needed, and it behaves identically for both providers.
 - **Diffs and the file tree come from `git diff`, not the ADO REST API.**
-  Both branches are already fetched locally for the checkout step, so `git
+  Both branches are fetched from origin, so `git
   diff origin/<target>...origin/<source>` gives `--numstat` (per-file
   `+`/`-` counts), `--name-status` (the file list), and each file's unified
   diff for free. The unified diff's `diff --git`/`index`/`---`/`+++`
   boilerplate is stripped (`lib/diff.ts`), keeping only the `@@` hunks.
   Earlier drafts fetched raw file content via ADO's `items` endpoint and
-  hand-rolled an LCS line diff — unnecessary once checkout was already
-  fetching the same refs, and git's own diff algorithm is better anyway.
+  hand-rolled an LCS line diff — unnecessary once the same refs were being
+  fetched anyway, and git's own diff algorithm is better.
+- **Read-only on your repo.** Opening a PR runs `git fetch origin <source>
+  <target>` (which, like any fetch, updates the `origin/*` refs and stores
+  their commits in `.git`) and then only reads: `git diff` and `git log` on
+  those refs. It never checks out, switches or creates a branch, makes a
+  worktree, or touches your working tree.
 - **The file list renders as a real folder tree** (`lib/tree.ts`, pure):
   changed files are grouped into a directory tree, single-child directory
   chains are compressed onto one line (`src/components/admin`), and each
@@ -173,11 +178,8 @@ into `~/.claude/skills/prs` to auto-load every session.
   `claude plugin validate`/`claude plugin test`, and manually against a real
   Azure DevOps org — but this is early-access (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`)
   and the API can shift between releases.
-- **Worktrees:** `git checkout <branch>` inside a git worktree fails if
-  that branch is already checked out in another worktree. The mod reports
-  this as a non-fatal note in the panel and still shows the diff (which
-  comes from fetched refs, not the working tree) — but you won't get a
-  local checkout to poke at until the other worktree moves off that branch.
+- **No local checkout.** To run or edit a PR's code, check its branch out
+  yourself (or in a worktree); `/prs` stays out of your working tree.
 - **Collapsed repos reset on plugin reload** (the collapse state is in
   memory only).
 - Comments, replies, and voting are unimplemented (next slice).

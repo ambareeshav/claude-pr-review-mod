@@ -41,8 +41,7 @@ type ViewState =
       selectedPath: string | null;
       diffCache: Map<string, string>;
       loadingDiff: boolean;
-      checkoutMessage: string | null;
-      checkoutNote: string | null;
+      fetchMessage: string | null;
     };
 
 let currentView: ViewState | null = null;
@@ -140,29 +139,6 @@ async function fetchBranches(
   }
   const res = await run($, ['git', 'fetch', 'origin', ...branches], group.root, env);
   return res.exitCode === 0 ? { ok: true } : { ok: false, message: res.stderr.trim().split('\n').pop() };
-}
-
-// Where `branch` is checked out, if in a worktree other than `root`: git
-// refuses a second checkout of it, and the review doesn't need one (the diff
-// comes from the fetched refs).
-async function worktreeHolding($: any, root: string, branch: string): Promise<string | null> {
-  const res = await run($, ['git', 'worktree', 'list', '--porcelain'], root);
-  if (res.exitCode !== 0) return null;
-  for (const block of res.stdout.split(/\n\n+/)) {
-    const path = /^worktree (.+)$/m.exec(block)?.[1];
-    const ref = /^branch (.+)$/m.exec(block)?.[1];
-    if (path && ref === `refs/heads/${branch}` && path !== root) return path;
-  }
-  return null;
-}
-
-async function checkoutBranch($: any, root: string, branch: string): Promise<{ ok: boolean; message?: string }> {
-  const checkout = await run($, ['git', 'checkout', branch], root);
-  if (checkout.exitCode === 0) return { ok: true };
-  // branch may not exist locally yet — try tracking the fetched remote ref
-  const track = await run($, ['git', 'checkout', '-b', branch, `origin/${branch}`], root);
-  if (track.exitCode === 0) return { ok: true };
-  return { ok: false, message: (checkout.stderr || track.stderr).trim() || 'git checkout failed' };
 }
 
 async function gitDiffFiles($: any, root: string, target: string, source: string): Promise<FileChange[]> {
@@ -425,19 +401,11 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
     ? await Promise.all([gitDiffFiles($, group.root, target, source), gitCommitsBetween($, group.root, target, source)])
     : [[], []];
 
-  let checkoutMessage: string | null = null;
-  let checkoutNote: string | null = null;
-  if (!fetched) {
-    checkoutMessage = `couldn't fetch ${source} and ${target} from origin${fetch.message ? `: ${fetch.message}` : ''}`;
-  } else {
-    const holder = await worktreeHolding($, group.root, source);
-    if (holder) {
-      checkoutNote = `${source} is checked out in worktree ${holder}`;
-    } else {
-      const outcome = await checkoutBranch($, group.root, source);
-      if (!outcome.ok) checkoutMessage = `couldn't check out ${source}: ${outcome.message}`;
-    }
-  }
+  // Read-only on the repo: no checkout, branch or worktree. The files and
+  // commits come from the fetched origin/* refs, never the working tree.
+  const fetchMessage = fetched
+    ? null
+    : `couldn't fetch ${source} and ${target} from origin${fetch.message ? `: ${fetch.message}` : ''}`;
 
   const view: ViewState = {
     mode: 'review',
@@ -450,8 +418,7 @@ async function openReview($: any, ttlMinutes: number, group: RepoGroup, prId: nu
     selectedPath: files[0]?.path ?? null,
     diffCache: new Map(),
     loadingDiff: false,
-    checkoutMessage,
-    checkoutNote,
+    fetchMessage,
   };
   currentView = view;
 
@@ -735,16 +702,10 @@ function renderView($: any, e: any, options: any, view: ViewState) {
         text={`${branchName(view.detail.sourceRefName)} → ${branchName(view.detail.targetRefName)} · ${view.detail.createdBy} · ${view.detail.status}${view.detail.isDraft ? ' · draft' : ''}`}
       />
       <Markdown text={`[↗ open PR #${view.detail.pullRequestId} in browser](${prWebUrl(view.group.ctx, view.detail.pullRequestId)})`} />
-      {view.checkoutMessage && (
+      {view.fetchMessage && (
         <>
           <Divider />
-          <Text color="yellow">{view.checkoutMessage}</Text>
-        </>
-      )}
-      {view.checkoutNote && (
-        <>
-          <Divider />
-          <Text dimColor>{view.checkoutNote}</Text>
+          <Text color="yellow">{view.fetchMessage}</Text>
         </>
       )}
       <Divider />

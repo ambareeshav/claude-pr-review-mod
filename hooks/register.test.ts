@@ -49,7 +49,6 @@ const SIGN_IN_PAGE = (tenant: string) =>
 function installMocks(
   on: any,
   opts: {
-    checkoutSucceeds?: boolean;
     remoteUrl?: string;
     orgTenant?: string;
     tenantDiscoverable?: boolean;
@@ -59,12 +58,9 @@ function installMocks(
     // dir -> origin URL, for a session spanning several repos; the first is the session's cwd.
     repos?: Record<string, string>;
     transcript?: string[];
-    // branch -> path of a worktree that has it checked out
-    worktrees?: Record<string, string>;
-    checkoutCalls?: string[][];
+    gitCalls?: string[][];
   } = {},
 ) {
-  const checkoutSucceeds = opts.checkoutSucceeds ?? true;
   const remoteUrl = opts.remoteUrl ?? REMOTE_URL;
   const tenantDiscoverable = opts.tenantDiscoverable ?? true;
 
@@ -72,6 +68,7 @@ function installMocks(
     const [cmd, ...rest] = e.argv as string[];
 
     const cwd = e.init?.cwd as string | undefined;
+    if (cmd === 'git') opts.gitCalls?.push(rest);
     if (cmd === 'git' && rest[0] === 'rev-parse') {
       if (!opts.repos) return { value: { exitCode: 0, stdout: '/repo\n', stderr: '' } };
       return cwd && opts.repos[cwd]
@@ -105,18 +102,6 @@ function installMocks(
         };
       }
       return { value: { exitCode: 0, stdout: '', stderr: '' } };
-    }
-    if (cmd === 'git' && rest[0] === 'worktree' && opts.worktrees) {
-      const blocks = [`worktree /repo\nHEAD aaaa\nbranch refs/heads/feature/KJR\n`].concat(
-        Object.entries(opts.worktrees).map(([b, path]) => `worktree ${path}\nHEAD bbbb\nbranch refs/heads/${b}\n`),
-      );
-      return { value: { exitCode: 0, stdout: blocks.join('\n'), stderr: '' } };
-    }
-    if (cmd === 'git' && rest[0] === 'checkout') {
-      opts.checkoutCalls?.push(rest);
-      return checkoutSucceeds
-        ? { value: { exitCode: 0, stdout: '', stderr: '' } }
-        : { value: { exitCode: 1, stdout: '', stderr: 'already checked out in another worktree' } };
     }
     if (cmd === 'git' && rest[0] === 'log') {
       const SEP1 = '\x1f';
@@ -246,14 +231,6 @@ test('a GitHub-remote repo lists and opens PRs via gh, not az/ADO', async ($: an
   expect(await ui.find({ text: /retry flaky upload/ })).toBeDefined();
   expect(await ui.find({ text: /octocat/ })).toBeDefined();
   await ui.unmount();
-});
-
-test('review view surfaces a checkout failure without erroring the command', async ($: any, on: any) => {
-  register(on, {});
-  installMocks(on, { checkoutSucceeds: false });
-
-  const result = await $.command.run({ command: 'prs', args: '318' });
-  expect(result.text).toBeUndefined();
 });
 
 test('the docked pane draws the file list and reacts to a file press', async ($: any, on: any) => {
@@ -415,17 +392,21 @@ test('the PR list paints a gradient background to the pane bottom, with short ce
   expect(between[0]!.text.trim().length).toBeLessThan(PANE_PROPS.bodyColumns / 2);
 });
 
-test('a PR branch already checked out in another worktree is noted, not reported as a failed checkout', async ($: any, on: any) => {
+test('opening a PR shows its files and commits without checking out, creating branches or worktrees', async ($: any, on: any) => {
   register(on, {});
-  const checkoutCalls: string[][] = [];
-  installMocks(on, { worktrees: { 'feature/trial-campaign': '/repo/.claude/worktrees/trial' }, checkoutCalls });
+  const gitCalls: string[][] = [];
+  installMocks(on, { gitCalls });
 
   await $.command.run({ command: 'prs', args: '318' });
   const ui = await mountPane($);
-  expect(checkoutCalls.length).toBe(0);
-  expect(await ui.find({ text: /couldn't check out/ })).toBeUndefined();
-  const note = await ui.find({ text: /checked out in worktree .*\/repo\/\.claude\/worktrees\/trial/ });
-  expect(note).toBeDefined();
-  expect(note!.props.color).toBeUndefined();
   expect(await ui.find({ text: /app\.ts/ })).toBeDefined();
+  await ui.press({ key: 'tab:commits' });
+  expect(await ui.find({ text: /fix upload retry/ })).toBeDefined();
+
+  const writes = gitCalls.filter(([sub, ...rest]) =>
+    sub === 'checkout' || sub === 'switch' || sub === 'worktree' || sub === 'reset' || sub === 'stash' ||
+    (sub === 'branch' && !rest.includes('--show-current')),
+  );
+  expect(writes).toEqual([]);
+  expect(await ui.find({ text: /check(ed)? out/ })).toBeUndefined();
 });
