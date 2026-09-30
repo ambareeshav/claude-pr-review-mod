@@ -25,6 +25,8 @@ const PR_77 = {
   isDraft: false,
 };
 
+const PR_319 = { ...PR_318, pullRequestId: 319, title: 'chore: bump deps', sourceRefName: 'refs/heads/chore/deps' };
+
 const API_REMOTE = 'https://dev.azure.com/aether-engineering/app-deployments/_git/api-backend';
 
 const GITHUB_PR_42 = {
@@ -175,7 +177,7 @@ function installMocks(
       return signIn(opts.orgTenant);
     }
     if (url.includes('/pullrequests?')) {
-      const prs = opts.repos && url.includes('/repositories/api-backend/') ? [PR_77] : [PR_318];
+      const prs = opts.repos ? (url.includes('/repositories/api-backend/') ? [PR_77] : [PR_318, PR_319]) : [PR_318];
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ value: prs }) } };
     }
     if (/\/pullrequests\/318\?/.test(url)) {
@@ -385,4 +387,20 @@ test('each repo collapses on its own, and expand all / collapse all act on every
   await ui.press({ key: 'expand-all' });
   expect(await ui.find({ key: 'open:/web:318' })).toBeDefined();
   expect(await ui.find({ key: 'open:/api:77' })).toBeDefined();
+});
+
+test('the PR list paints a gradient background to the pane bottom, with short centred dividers between PRs', async ($: any, on: any) => {
+  register(on, {});
+  installMocks(on, { repos: TWO_REPOS, transcript: [ADD_DIR_WEB] });
+  await $.command.run({ command: 'prs', args: '--all' });
+  const ui = await mountPane($);
+
+  const rows = await ui.findAll({ type: 'Box' });
+  const painted = rows.filter((b: any) => typeof b.props.backgroundColor === 'string');
+  expect(painted.length).toBeGreaterThanOrEqual(PANE_PROPS.scroll.bodyRows);
+  expect(new Set(painted.map((b: any) => b.props.backgroundColor)).size).toBeGreaterThan(5);
+
+  const between = await ui.findAll({ type: 'Text', text: /^\s*┄+\s*$/ });
+  expect(between.length).toBe(1); // web-frontend's two PRs; none after a repo's last PR
+  expect(between[0]!.text.trim().length).toBeLessThan(PANE_PROPS.bodyColumns / 2);
 });

@@ -457,6 +457,145 @@ async function loadDiffForSelected($: any, view: Extract<ViewState, { mode: 'rev
   }
 }
 
+// --- the PR list's look ---------------------------------------------------
+// Raw hex, not theme keys, so it reads the same in either terminal theme. The
+// background is a vertical gradient, ink → dusty plum, painted one solid row
+// at a time (there's no gradient prop); the pastels on top stay muted.
+const BG_FROM = [0x17, 0x19, 0x21];
+const BG_TO = [0x3a, 0x30, 0x42];
+const REPO_TINTS = ['#a9c4a4', '#b9aedc', '#e2b9a0', '#9fbfd6', '#d6a9b8']; // sage, lavender, peach, sky, rose
+const RULE_COLOR = '#5d566e';
+const HAIRLINE_COLOR = '#4a4558';
+const ERROR_COLOR = '#d99a9a';
+const ROW_HOVER = { backgroundColor: '#2d2a3a', color: '#e8e3f2' } as const;
+
+function gradientAt(row: number, rows: number): string {
+  const t = Math.pow(Math.min(1, Math.max(0, row / Math.max(1, rows - 1))), 1.3);
+  return '#' + BG_FROM.map((from, i) => Math.round(from + (BG_TO[i]! - from) * t).toString(16).padStart(2, '0')).join('');
+}
+
+// one pane line, cut to fit: a row that wrapped would throw the gradient off
+function fit(label: string, columns: number): string {
+  const room = Math.max(8, columns - 2);
+  return label.length > room ? label.slice(0, room - 1) + '…' : label;
+}
+
+function renderBrowser($: any, e: any, ttlMinutes: number, view: Extract<ViewState, { mode: 'browser' }>) {
+  const { Box, Text, Button } = $.ui.resolve(e);
+  const columns = Math.max(20, (e.props as any)?.bodyColumns ?? 60);
+  const bodyRows = Math.max(1, (e.props as any)?.scroll?.bodyRows ?? 30);
+
+  // every entry is exactly one line; its background comes from its position
+  const rows: { key: string; hover?: boolean; draw: () => any }[] = [];
+  if (view.groups.length > 1) {
+    rows.push({
+      key: 'row:toolbar',
+      draw: () => (
+        <Box flexDirection="row" columnGap={2}>
+          <Button
+            key="expand-all"
+            plain
+            label="⊞ Expand all"
+            dimColor
+            onPress={() => {
+              collapsedRoots.clear();
+              $.ui.invalidate('ui.render');
+            }}
+          />
+          <Button
+            key="collapse-all"
+            plain
+            label="⊟ Collapse all"
+            dimColor
+            onPress={() => {
+              for (const g of view.groups) collapsedRoots.add(g.group.root);
+              $.ui.invalidate('ui.render');
+            }}
+          />
+        </Box>
+      ),
+    });
+  }
+  view.groups.forEach(({ group, prs, error }, i) => {
+    const tint = REPO_TINTS[i % REPO_TINTS.length]!;
+    const collapsed = collapsedRoots.has(group.root);
+    if (rows.length > 0) {
+      rows.push({ key: `row:rule:${group.root}`, draw: () => <Text color={RULE_COLOR}>{'─'.repeat(columns - 2)}</Text> });
+    }
+    rows.push({
+      key: `row:head:${group.root}`,
+      draw: () => (
+        <Box flexDirection="row" columnGap={1}>
+          <Button
+            key={`toggle:${group.root}`}
+            plain
+            label={collapsed ? '▸' : '▾'}
+            onPress={() => {
+              if (collapsed) collapsedRoots.delete(group.root);
+              else collapsedRoots.add(group.root);
+              $.ui.invalidate('ui.render');
+            }}
+          />
+          <Text bold color={tint}>{group.label}</Text>
+          <Text dimColor>{error ? '· error' : `· ${prs.length} open`}</Text>
+        </Box>
+      ),
+    });
+    if (collapsed) return;
+    if (error) {
+      rows.push({ key: `row:error:${group.root}`, draw: () => <Text color={ERROR_COLOR}>{fit(`  ${error}`, columns)}</Text> });
+    } else if (prs.length === 0) {
+      rows.push({ key: `row:empty:${group.root}`, draw: () => <Text dimColor>{'  no active pull requests'}</Text> });
+    }
+    prs.forEach((pr, j) => {
+      if (j > 0) {
+        const width = Math.max(6, Math.floor(columns * 0.3));
+        const pad = ' '.repeat(Math.max(0, Math.floor((columns - 2 - width) / 2)));
+        rows.push({
+          key: `row:hair:${group.root}:${pr.pullRequestId}`,
+          draw: () => <Text color={HAIRLINE_COLOR}>{pad + '┄'.repeat(width)}</Text>,
+        });
+      }
+      rows.push({
+        key: `row:pr:${group.root}:${pr.pullRequestId}`,
+        hover: true,
+        draw: () => (
+          <Button
+            key={`open:${group.root}:${pr.pullRequestId}`}
+            plain
+            hover={ROW_HOVER}
+            label={fit(`  #${pr.pullRequestId}  ${pr.title} — ${pr.createdBy}${pr.isDraft ? ' (draft)' : ''}`, columns)}
+            onPress={() => {
+              openReview($, ttlMinutes, group, pr.pullRequestId).then(() => $.ui.invalidate('ui.render'));
+            }}
+          />
+        ),
+      });
+    });
+  });
+
+  // filler rows carry the gradient to the pane's bottom under a short list
+  const total = Math.max(bodyRows, rows.length);
+  for (let n = rows.length; n < total; n++) rows.push({ key: `row:fill:${n}`, draw: () => <Text> </Text> });
+
+  return (
+    // sized to the pane: a Box only paints its background over the cells it occupies
+    <Box flexDirection="column" width={columns}>
+      {rows.map((row, n) => (
+        <Box
+          key={row.key}
+          height={1}
+          paddingX={1}
+          backgroundColor={gradientAt(n, total)}
+          {...(row.hover ? { hover: { backgroundColor: ROW_HOVER.backgroundColor } } : {})}
+        >
+          {row.draw()}
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
 function renderView($: any, e: any, options: any, view: ViewState) {
   const { Box, Text, Markdown, Button } = $.ui.resolve(e);
   const ttlMinutes = ttlMinutesFrom(options);
@@ -469,57 +608,7 @@ function renderView($: any, e: any, options: any, view: ViewState) {
   }
 
   if (view.mode === 'browser') {
-    const redraw = () => $.ui.invalidate('ui.render');
-    return (
-      <Box flexDirection="column">
-        {view.groups.length > 1 && (
-          <Box flexDirection="row" gap={1}>
-            <Button key="expand-all" label="Expand all" dimColor onPress={() => { collapsedRoots.clear(); redraw(); }} />
-            <Button
-              key="collapse-all"
-              label="Collapse all"
-              dimColor
-              onPress={() => { for (const g of view.groups) collapsedRoots.add(g.group.root); redraw(); }}
-            />
-          </Box>
-        )}
-        {view.groups.map(({ group, prs, error }, i) => {
-          const collapsed = collapsedRoots.has(group.root);
-          return (
-            <Box key={`group:${group.root}`} flexDirection="column">
-              {(i > 0 || view.groups.length > 1) && <Divider />}
-              <Box flexDirection="row" gap={1}>
-                <Button
-                  key={`toggle:${group.root}`}
-                  label={collapsed ? '▸' : '▾'}
-                  plain
-                  onPress={() => {
-                    if (collapsed) collapsedRoots.delete(group.root);
-                    else collapsedRoots.add(group.root);
-                    redraw();
-                  }}
-                />
-                <Text bold>{group.label}</Text>
-                <Text dimColor>{error ? 'error' : `${prs.length} open`}</Text>
-              </Box>
-              {!collapsed && error && <Text color="red">{error}</Text>}
-              {!collapsed && !error && prs.length === 0 && <Text dimColor>no active pull requests</Text>}
-              {!collapsed &&
-                prs.map((pr) => (
-                  <Button
-                    key={`open:${group.root}:${pr.pullRequestId}`}
-                    label={`  #${pr.pullRequestId} ${pr.title} — ${pr.createdBy}${pr.isDraft ? ' (draft)' : ''}`}
-                    plain
-                    onPress={() => {
-                      openReview($, ttlMinutes, group, pr.pullRequestId).then(redraw);
-                    }}
-                  />
-                ))}
-            </Box>
-          );
-        })}
-      </Box>
-    );
+    return renderBrowser($, e, ttlMinutes, view);
   }
 
   const tabButton = (tab: ReviewTab, label: string) => (
