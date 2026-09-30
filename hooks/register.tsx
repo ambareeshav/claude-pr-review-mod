@@ -1,6 +1,6 @@
 import { parseRemote, branchName, prWebUrl } from './lib/git';
 import type { AdoRepoContext, GithubRepoContext, RepoContext } from './lib/git';
-import { adoBaseUrl, toPullRequestSummary, ADO_API_VERSION, ADO_RESOURCE_ID } from './lib/ado';
+import { adoBaseUrl, toPullRequestSummary, isSignInPage, tenantFromSignIn, ADO_API_VERSION, ADO_RESOURCE_ID } from './lib/ado';
 import type { PullRequestSummary, PullRequestDetail } from './lib/ado';
 import { buildFileTreeRows } from './lib/tree';
 import type { FileChange } from './lib/tree';
@@ -14,6 +14,7 @@ import { cleanUnifiedDiff } from './lib/diff';
 // or a function nested inside another.
 
 const TOKEN_STORE_KEY = 'prs:ado-token';
+const TENANT_STORE_KEY = 'prs:ado-tenant';
 const PANE_ID = 'prs';
 const MAX_DIFF_CHARS = 9000; // Markdown elements cap at 10000 chars
 
@@ -175,8 +176,22 @@ async function gitCommitsBetween($: any, root: string, target: string, source: s
 
 // --- Azure DevOps REST (PR metadata only; diffs come from git) --------
 
-async function getAdoAccessToken($: any, ttlMinutes: number): Promise<string> {
-  const cached = (await $.store.get(TOKEN_STORE_KEY)) as { token: string; expiresAt: number } | undefined;
+// The org's Entra tenant, found by asking ADO anonymously. az's default account
+// may sit in a different tenant, and a token from there gets a sign-in page.
+async function resolveAdoTenant($: any, org: string): Promise<string | undefined> {
+  const key = `${TENANT_STORE_KEY}:${org}`;
+  const cached = (await $.store.get(key)) as string | undefined;
+  if (cached) return cached;
+
+  const res = await $.http.fetch(`https://dev.azure.com/${encodeURIComponent(org)}/_apis/connectionData`);
+  const tenant = tenantFromSignIn(res);
+  if (tenant) await $.store.set(key, tenant);
+  return tenant;
+}
+
+async function getAdoAccessToken($: any, ttlMinutes: number, tenant: string | undefined): Promise<string> {
+  const key = `${TOKEN_STORE_KEY}:${tenant ?? 'default'}`;
+  const cached = (await $.store.get(key)) as { token: string; expiresAt: number } | undefined;
   const now = Date.now();
   if (cached && cached.expiresAt > now) return cached.token;
 
@@ -188,36 +203,46 @@ async function getAdoAccessToken($: any, ttlMinutes: number): Promise<string> {
   const tokenRes = await run($, [
     'az', 'account', 'get-access-token',
     '--resource', ADO_RESOURCE_ID,
+    ...(tenant ? ['--tenant', tenant] : []),
     '--query', 'accessToken',
     '-o', 'tsv',
   ]);
   const token = tokenRes.stdout.trim();
   if (tokenRes.exitCode !== 0 || !token) {
-    throw new Error(`Failed to get an Azure DevOps access token via az CLI: ${tokenRes.stderr.trim()}`);
+    const hint = tenant ? ` Run \`az login --tenant ${tenant}\` in a terminal, then retry /prs.` : '';
+    throw new Error(`Failed to get an Azure DevOps access token via az CLI: ${tokenRes.stderr.trim()}${hint}`);
   }
 
-  await $.store.set(TOKEN_STORE_KEY, { token, expiresAt: now + ttlMinutes * 60_000 });
+  await $.store.set(key, { token, expiresAt: now + ttlMinutes * 60_000 });
   return token;
 }
 
-async function adoJson($: any, ttlMinutes: number, url: string): Promise<any> {
-  const token = await getAdoAccessToken($, ttlMinutes);
+async function adoJson($: any, ttlMinutes: number, ctx: AdoRepoContext, url: string): Promise<any> {
+  const tenant = await resolveAdoTenant($, ctx.org);
+  const token = await getAdoAccessToken($, ttlMinutes, tenant);
   const res = await $.http.fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
     throw new Error(`Azure DevOps API ${res.status} on ${url.split('?')[0]}: ${(res.text ?? '').slice(0, 300)}`);
+  }
+  if (isSignInPage(res)) {
+    const login = tenant ? `az login --tenant ${tenant}` : 'az login';
+    throw new Error(
+      `Azure DevOps sent a sign-in page instead of data for org "${ctx.org}", so the az CLI account can't access it. ` +
+        `Run \`${login}\` with an account in that org, then retry /prs.`,
+    );
   }
   return JSON.parse(res.text);
 }
 
 async function listAdoPullRequests($: any, ctx: AdoRepoContext, ttlMinutes: number): Promise<PullRequestSummary[]> {
   const url = `${adoBaseUrl(ctx)}/pullrequests?searchCriteria.status=active&api-version=${ADO_API_VERSION}`;
-  const body = await adoJson($, ttlMinutes, url);
+  const body = await adoJson($, ttlMinutes, ctx, url);
   return (body.value ?? []).map(toPullRequestSummary);
 }
 
 async function getAdoPullRequest($: any, ctx: AdoRepoContext, ttlMinutes: number, id: number): Promise<PullRequestDetail> {
   const url = `${adoBaseUrl(ctx)}/pullrequests/${id}?api-version=${ADO_API_VERSION}`;
-  const pr = await adoJson($, ttlMinutes, url);
+  const pr = await adoJson($, ttlMinutes, ctx, url);
   return { ...toPullRequestSummary(pr), description: pr.description ?? '' };
 }
 

@@ -25,9 +25,19 @@ const GITHUB_PR_42 = {
   state: 'OPEN',
 };
 
-function installMocks(on: any, opts: { checkoutSucceeds?: boolean; remoteUrl?: string } = {}) {
+const SIGN_IN_PAGE = (tenant: string) =>
+  `<html><script>var u="https://login.microsoftonline.com/${tenant}/oauth2/authorize?client_id=499b84ac"</script></html>`;
+
+// orgTenant: the Entra tenant backing the ADO org. When set, ADO only answers
+// JSON to a token az minted for that tenant; any other token gets the 203
+// sign-in page ADO really sends. azCalls collects every az argv.
+function installMocks(
+  on: any,
+  opts: { checkoutSucceeds?: boolean; remoteUrl?: string; orgTenant?: string; tenantDiscoverable?: boolean; azCalls?: string[][] } = {},
+) {
   const checkoutSucceeds = opts.checkoutSucceeds ?? true;
   const remoteUrl = opts.remoteUrl ?? REMOTE_URL;
+  const tenantDiscoverable = opts.tenantDiscoverable ?? true;
 
   on('process.run', async ($: any, e: any, next: any) => {
     const [cmd, ...rest] = e.argv as string[];
@@ -92,11 +102,14 @@ function installMocks(on: any, opts: { checkoutSucceeds?: boolean; remoteUrl?: s
         },
       };
     }
+    if (cmd === 'az') opts.azCalls?.push(rest);
     if (cmd === 'az' && rest.join(' ') === 'account show') {
       return { value: { exitCode: 0, stdout: '{}', stderr: '' } };
     }
     if (cmd === 'az' && rest[0] === 'account') {
-      return { value: { exitCode: 0, stdout: 'fake-token\n', stderr: '' } };
+      const t = rest.indexOf('--tenant');
+      const token = t >= 0 ? `token-for-${rest[t + 1]}` : 'fake-token';
+      return { value: { exitCode: 0, stdout: token + '\n', stderr: '' } };
     }
     return { value: { exitCode: 1, stdout: '', stderr: `unmocked argv: ${e.argv.join(' ')}` } };
   });
@@ -107,6 +120,18 @@ function installMocks(on: any, opts: { checkoutSucceeds?: boolean; remoteUrl?: s
 
   on('http.fetch', async ($: any, e: any, next: any) => {
     const url = e.url as string;
+    const auth = e.init?.headers?.Authorization as string | undefined;
+    const signIn = (tenant: string) => ({
+      value: { status: 203, ok: true, headers: { 'content-type': 'text/html; charset=utf-8' }, text: SIGN_IN_PAGE(tenant) },
+    });
+    if (url.endsWith('/_apis/connectionData')) {
+      return opts.orgTenant && tenantDiscoverable
+        ? signIn(opts.orgTenant)
+        : { value: { status: 404, ok: false, headers: {}, text: 'not found' } };
+    }
+    if (opts.orgTenant && auth !== `Bearer token-for-${opts.orgTenant}`) {
+      return signIn(opts.orgTenant);
+    }
     if (url.includes('/pullrequests?')) {
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ value: [PR_318] }) } };
     }
@@ -233,4 +258,26 @@ test('the commits tab lists commits compactly and expands one on press', async (
   expect(await ui.find({ text: /Retries once on a 5xx/ })).toBeUndefined();
 
   await ui.unmount();
+});
+
+test('an ADO org in another Entra tenant gets a token minted for that tenant', async ($: any, on: any) => {
+  register(on, {});
+  const azCalls: string[][] = [];
+  installMocks(on, { orgTenant: '0b3d9e34-d046-4f37-8cc3-9126231ffdb3', azCalls });
+
+  const result = await $.command.run({ command: 'prs', args: '' });
+  expect(result.text).toBeUndefined();
+  const tokenCall = azCalls.find((argv) => argv.includes('get-access-token'));
+  expect(tokenCall).toContain('--tenant');
+  expect(tokenCall).toContain('0b3d9e34-d046-4f37-8cc3-9126231ffdb3');
+});
+
+test('a sign-in page instead of JSON is reported as an auth problem, not a parse error', async ($: any, on: any) => {
+  register(on, {});
+  installMocks(on, { orgTenant: '0b3d9e34-d046-4f37-8cc3-9126231ffdb3', tenantDiscoverable: false });
+
+  const result = await $.command.run({ command: 'prs', args: '' });
+  expect(result.text).not.toContain('JSON Parse');
+  expect(result.text).toContain('sign-in page');
+  expect(result.text).toContain('az login');
 });
